@@ -1,0 +1,4 @@
+{
+  "lighting": { "virtual": { "strip": { "effect": "rainbow", "leds": 8 } } },
+  "plugins": { "virtual_led": { "lose_after_frames": 5 } },
+}

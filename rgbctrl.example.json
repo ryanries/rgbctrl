@@ -1,0 +1,53 @@
+{
+  "log": {
+    "level": "debug",
+    "file": "rgbctrl.log",
+    "max_size_kb": 1024
+  },
+
+  "frame_rate": 30,
+
+  "lighting": {
+    "*": {
+      "*": { "effect": "static", "color": "#FFFFFF", "brightness": 60 }
+    },
+
+    "motherboard": {
+      "argb1": { "leds": 30, "effect": "rainbow", "speed": 40 },
+      "argb2": { "leds": 30, "effect": "gradient", "colors": ["#FF0040", "#4000FF"] },
+      "argb3": { "leds": 0, "effect": "none" },
+      "rgb12v": { "effect": "breathing", "color": "#00A0FF", "speed": 30 },
+      "io_cover": { "effect": "static", "color": "#00A0FF" },
+      "chipset": { "effect": "static", "color": "#00A0FF" }
+    },
+
+    "gpu": {
+      "*": { "effect": "static", "color": "#00A0FF" },
+      "fan_left": { "effect": "cycle", "speed": 20 },
+      "fan_middle": { "effect": "cycle", "speed": 20 },
+      "fan_right": { "effect": "cycle", "speed": 20 },
+      "extra": { "effect": "off" }
+    },
+
+    "keyboard": {
+      "keys": { "effect": "rainbow", "speed": 30, "brightness": 50 }
+    },
+
+    "ram": {
+      "dimm1": { "effect": "gradient", "colors": ["#FF0000", "#0000FF"] },
+      "dimm2": { "effect": "gradient", "colors": ["#FF0000", "#0000FF"] }
+    }
+  },
+
+  "plugins": {
+    "sudokoo_sk700v": {
+      "temp_sensor": "cpu.temp",
+      "power_sensor": "cpu.power",
+      "load_sensor": "cpu.load",
+      "freq_sensor": "cpu.freq",
+      "temperature_unit": "C",
+      "power_bar_max_watts": 162,
+      "blank_on_exit": true
+    }
+  }
+}

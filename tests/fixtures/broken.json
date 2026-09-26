@@ -1,0 +1,5 @@
+{
+  "lighting": {
+    "virtual": { "strip": { "effect": "static" }
+  },
+}

@@ -1,0 +1,6 @@
+{
+  "log": { "level": "trace" },
+  "lighting": {
+    "virtual": { "strip": { "effect": "rainbow", "leds": 24, "speed": 80 } },
+  },
+}

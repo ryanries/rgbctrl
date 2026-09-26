@@ -1,0 +1,6 @@
+{
+  "log": { "level": "debug" },
+  "lighting": {
+    "virtual": { "strip": { "effect": "static", "color": "#FF8800", "leds": 24 } },
+  },
+}

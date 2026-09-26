@@ -1,0 +1,3 @@
+{
+  "plugins": { "virtual_led": { "fail_open": true } },
+}

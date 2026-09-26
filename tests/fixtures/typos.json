@@ -1,0 +1,8 @@
+{
+  "lightning": {},
+  "lighting": {
+    "virtul": { "strip": { "effect": "static" } },
+    "virtual": { "strp": { "effect": "static" }, "strip": { "efect": "static", "color": "#FFFFFF" } },
+  },
+  "plugins": { "virtual_ld": {} },
+}

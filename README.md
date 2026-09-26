@@ -1,0 +1,177 @@
+# rgbctrl
+
+rgbctrl is a small native Windows program that controls the RGB lighting and the LED
+display on one specific PC without any vendor software. It reads a JSON configuration file,
+drives each device through its own plugin DLL, writes a text log for diagnostics, and runs
+either once (`apply`) or resident (`run`, for example as a SYSTEM scheduled task).
+
+- `rgbctrl.exe` (the host) knows nothing about any device. It parses the configuration,
+  loads the plugins, renders host-side effects and supervises one worker thread per plugin.
+- Every device family is a separate DLL in `plugins\` that implements the C ABI in
+  `include\rgbctrl_plugin.h`. Anyone can add hardware by writing another DLL, in Zig with the
+  SDK in `sdk\` or in C (see `examples\c_plugin\virtual_led.c` and `docs\plugin-abi.md`).
+- Written in Zig 0.16.0 against the Win32 API directly; no runtime dependencies besides
+  Windows itself (and the PawnIO driver for the features that need it).
+
+Status: all protocol code is unit tested with byte vectors taken from the protocol research,
+and the host is tested end to end with a virtual device (`tests\smoke.ps1`), but nothing has
+been tested on the real hardware yet. Follow the first-run checklist below and enable one
+device at a time.
+
+## Supported hardware
+
+| Part | What rgbctrl controls | Plugin | Notes |
+|---|---|---|---|
+| Gigabyte X870E AORUS PRO ICE (ITE IT5711, USB 048D:5711) | 3 ARGB headers, 12 V RGB header, I/O cover, chipset | `gigabyte_fusion2` | set `leds` for each ARGB header |
+| Gigabyte AORUS RTX 5080 MASTER ICE (and other allowlisted Gigabyte GeForce cards) | fan rings and logos | `gigabyte_gpu` | RGB only; the LCD is not supported |
+| Corsair Vengeance RGB DDR5 | 10 LEDs per DIMM | `corsair_ddr5` | opt-in; needs PawnIO and elevation |
+| Keychron Q6 Max (3434:0860/0861/0862) | per-key RGB | `keychron` | per-key frames need firmware with the 0xA8 protocol |
+| Sudokoo SK700V (381C:0003) | CPU temperature, power, load and frequency readout | `sudokoo_sk700v` | the display has no fan speed field |
+| AMD Ryzen (Zen and later) | sensors: `cpu.temp`, `cpu.ccd<N>.temp`, `cpu.power` | `amd_cpu` | needs PawnIO and elevation |
+| Windows | sensors: `cpu.load`, `cpu.freq`, `mem.load` | `windows_metrics` | |
+
+`docs\devices.md` has the details for every device: zone names, supported effects, what the
+plugin sends during discovery, and known conflicts.
+
+## Build
+
+1. Install Zig 0.16.0 (`winget install zig.zig`).
+2. `zig build --release` builds everything into `zig-out\`:
+   - `bin\rgbctrl.exe`, `bin\plugins\*.dll`, `bin\rgbctrl.example.json`
+   - `bin\pawnio\AMDFamily17.bin` and `bin\pawnio\SmbusPIIX4.bin` (downloaded once from the
+     pinned PawnIO.Modules 0.2.11 release and verified by hash; `-Dpawnio-modules=false` skips them)
+   - `bin\examples\virtual_led.dll` (the example plugin) and `include\rgbctrl_plugin.h`
+3. `zig build test` runs the unit tests; `pwsh tests\smoke.ps1` runs the end-to-end tests
+   against the virtual plugin (it never loads the hardware plugins).
+
+To install rgbctrl as a SYSTEM task later (see "Run at startup"), build in a folder that only
+you and administrators can modify, for example under your user profile: folders created
+directly under `C:\` usually let every signed-in user change them, and the installer refuses
+to copy such a build into the protected program folder.
+
+## First-run checklist
+
+1. Close or uninstall the vendor tools that talk to the same devices: Gigabyte Control Center /
+   RGB Fusion, AORUS Engine / GCC GPU lighting, Keychron Launcher (a browser tab with it open
+   also holds the keyboard), the Sudokoo / MasterCraft display software, Corsair iCUE, OpenRGB,
+   SignalRGB. rgbctrl opens the HID devices exclusively and reports "in use by another
+   application" when another program holds them. Windows Dynamic Lighting (Settings >
+   Personalization > Dynamic Lighting) should be turned off for these devices.
+2. For CPU temperature and power on the SK700V display and for DDR5 lighting, install the
+   signed PawnIO driver: `winget install namazso.PawnIO`. These features also need rgbctrl to
+   run elevated (the scheduled task does).
+3. Run `zig-out\bin\rgbctrl.exe list`. It shows the plugins, the devices and zones found on
+   this PC, and the sensors, without changing any lighting. The log `rgbctrl.log` next to
+   `rgbctrl.exe` (or in `%LOCALAPPDATA%\rgbctrl\` when that folder is not writable) has the
+   details, including every probe the plugins made. Unelevated, `cpu.temp` and `cpu.power`
+   show as unavailable. An elevated run refuses to start from a folder that is not admin-only
+   (such as `zig-out\bin`, exit code 4); either install first (see "Run at startup") and run
+   the installed `rgbctrl.exe`, or add `--allow-insecure-install` for a one-off test.
+4. Create your configuration at `%LOCALAPPDATA%\rgbctrl\rgbctrl.json`. Start from
+   `rgbctrl.example.json` and keep only the devices you want to change; zones that are not
+   mentioned are left untouched. `docs\configuration.md` describes every key.
+5. `rgbctrl apply` applies hardware effects and one frame of host effects and exits;
+   `rgbctrl run` keeps animating, updates the SK700V display every second and reloads the
+   configuration when you save it. Stop it with Ctrl+C or `rgbctrl stop`.
+6. Enable devices one at a time. Leave DDR5 for last: it is opt-in and must be enabled in the
+   admin-only base file (`"plugins": {"corsair_ddr5": {"enabled": true}}` in
+   `%ProgramData%\rgbctrl\rgbctrl.json`).
+
+## Run at startup
+
+`scripts\install.ps1` (from an elevated PowerShell, after `zig build --release`) performs a
+fresh install:
+
+- refuses to install when accounts other than you, SYSTEM and Administrators can modify the
+  build output or its parent folders (folders created directly under `C:\` usually let every
+  signed-in user modify them); build under your user profile, or pass `-AllowSharedSource` if
+  you accept that risk,
+- copies rgbctrl into `%ProgramFiles%\rgbctrl` with an admin-only ACL and verifies it with
+  `rgbctrl check-install`,
+- creates the admin-only base config folder `%ProgramData%\rgbctrl` if it does not exist,
+- creates `%LOCALAPPDATA%\rgbctrl\rgbctrl.json` from the example if it does not exist,
+- registers the scheduled task `rgbctrl` that runs `rgbctrl run --config <your user file>` as
+  SYSTEM at startup, and the Event Log source `rgbctrl`. `-StartNow` starts it immediately.
+
+Control the task with `Start-ScheduledTask -TaskName rgbctrl` and
+`Stop-ScheduledTask -TaskName rgbctrl`, or `rgbctrl stop` from an elevated prompt (that path
+lets rgbctrl shut down cleanly: final save to device memory when enabled, SK700V blanked).
+Stopping the task terminates the process without that cleanup. The log of the task is
+`%ProgramFiles%\rgbctrl\rgbctrl.log`. `scripts\uninstall.ps1` removes the task, the program
+folder and the Event Log source and keeps both configuration files. Upgrades are an uninstall
+followed by an install.
+
+## Commands
+
+```
+rgbctrl run [--config <path>] [--allow-insecure-install]
+rgbctrl apply [--config <path>] [--allow-insecure-install]
+rgbctrl list [--config <path>] [--allow-insecure-install]
+rgbctrl stop
+rgbctrl check-install [--dir <path>]
+rgbctrl version
+rgbctrl help
+```
+
+Exit codes: 0 ok; 1 usage or configuration error (`apply` refuses to touch any lighting when a
+configuration file cannot be used; `apply` and `list` also exit 1 when a zone setting is
+invalid, after doing their work); 2 another instance is running (for `stop`: nothing
+running was reachable); 3 internal error; 4 the install folder is not admin-only while
+running elevated (or `check-install` found an install problem); 5 `check-install` found a base
+config folder or file that exists but is not admin-only.
+
+Only one instance runs at a time (`run`, `apply` and `list` all take the machine-wide
+instance lock), so stop the resident instance before using `apply` or `list`.
+
+## Diagnostics
+
+- The log is `rgbctrl.log` next to `rgbctrl.exe` (elevated and SYSTEM runs always log there,
+  because the folder is verified to be admin-only). Unelevated runs fall back to
+  `%LOCALAPPDATA%\rgbctrl\` when the program folder is not writable. The file is rotated to
+  `rgbctrl.log.1` at `log.max_size_kb`; if another program holds the log open so it cannot be
+  renamed, the log is copied to `rgbctrl.log.1` and then emptied. If the copy fails too,
+  nothing is emptied: rotation is retried every 60 s and the file never grows beyond twice
+  that size (dropped warnings and errors then go to the Windows Event Log when there is no
+  console). If the log file cannot be opened, rgbctrl retries every 5 s and keeps the messages
+  in memory meanwhile; without a console, warnings and errors then go to the Windows Event Log.
+- `log.level` `debug` (the default) records every probe and response; `trace` also records
+  every frame. Warnings and errors are also printed to the console.
+- Problems before the log can be opened go to stderr, and to the Windows Event Log (source
+  `rgbctrl`) when there is no console, for example when the scheduled task cannot start.
+- The banner at the top of every run lists the version, mode, paths, Windows build,
+  privileges, the install check, the PawnIO driver, every plugin and device, and both config
+  files with their status.
+
+## Security model
+
+Plugins run inside rgbctrl with its privileges, and some of them talk to the SMBus and PCI
+configuration space through PawnIO. When rgbctrl runs elevated or as SYSTEM it therefore
+refuses to start (exit 4) unless its own folder, `plugins\`, `pawnio\`, every DLL and module in
+them and every parent folder are owned by SYSTEM, Administrators or TrustedInstaller and cannot
+be modified by anyone else (`--allow-insecure-install` overrides this for development only).
+It never reads configuration from its own folder. The user config file is treated as
+untrusted when elevated: it is opened without following links or junctions anywhere in its
+path, a `plugins` section with more than 256 entries is ignored, and it can only make the
+privileged keys more restrictive; those keys (`enabled`, `persist`, `extra_ids` and
+`sudokoo_sk700v.exclusive`) take effect from the admin-only base file only. PawnIO modules
+are checked against pinned SHA-256 hashes before they are loaded.
+
+## Documentation
+
+- `docs\configuration.md`: configuration files, every key, effects, engines, reload.
+- `docs\devices.md`: devices, zones, effects, discovery transactions, conflicts.
+- `docs\plugin-abi.md`: the plugin ABI, the Zig SDK, the C example, and the terminology.
+
+## Known limitations
+
+- Not yet tested on the real hardware (see the checklist above).
+- The RTX 5080 LCD, Super I/O fan control, the Keychron wireless dongle and DDR5 hardware
+  effects are not implemented.
+- The SK700V display has no field for fan speed; it shows temperature, power, load and
+  frequency.
+- `rgbctrl.exe` is about 160 KiB (163,328 bytes), above the 96 KiB target of the design; the
+  plugins are 8 to 24 KiB, with `keychron.dll` exactly at the 24 KiB limit that CI enforces.
+
+## License
+
+No license has been chosen for this project yet.

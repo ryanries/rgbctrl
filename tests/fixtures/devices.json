@@ -1,0 +1,6 @@
+{
+  "lighting": {
+    "virtual2": { "strip": { "effect": "static", "color": "#00FF00" } },
+  },
+  "plugins": { "virtual_led": { "bad_device": true, "extra_device": true } },
+}

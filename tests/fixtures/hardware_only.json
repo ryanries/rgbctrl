@@ -1,0 +1,4 @@
+{
+  "lighting": { "virtual": { "strip": { "effect": "rainbow" } } },
+  "plugins": { "virtual_led": { "hardware_only": true } },
+}

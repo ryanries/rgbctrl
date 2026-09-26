@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - name: Check out (actions/checkout v7.0.1)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install Zig 0.16.0 (mlugg/setup-zig v2.2.1)
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: 0.16.0
+
+      - name: Unit tests
+        run: zig build test --summary all
+
+      - name: Release build
+        run: zig build --release --summary all
+
+      - name: Smoke tests with the virtual plugin
+        shell: pwsh
+        run: ./tests/smoke.ps1
+
+      - name: Size report and plugin size limit
+        shell: pwsh
+        run: |
+          Get-ChildItem zig-out/bin -Recurse -File | Select-Object FullName, Length | Format-Table -AutoSize
+          $oversized = Get-ChildItem zig-out/bin/plugins -Filter *.dll | Where-Object { $_.Length -gt 24576 }
+          if ($oversized) { $oversized | ForEach-Object { Write-Error "$($_.Name) is $($_.Length) bytes, above the 24 KiB plugin limit" }; exit 1 }
+          $exe = Get-Item zig-out/bin/rgbctrl.exe
+          if ($exe.Length -gt 196608) { Write-Error "rgbctrl.exe is $($exe.Length) bytes, above the 192 KiB regression limit"; exit 1 }
