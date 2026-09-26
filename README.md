@@ -131,11 +131,11 @@ whatever is already there:
 }
 ```
 
-A resident `run` saves roughly 60 s after an effect is applied, and no more than once a minute
-per device; look for `saved the current settings to device memory` in the log. The save
-captures whatever is showing at that instant, so apply your colors and wait for that line before
-launching a game. `apply` never writes device memory. `docs\configuration.md` ("Saving to
-device memory") has the full policy.
+A resident `run` saves once a device's effects have been unchanged for 60 s, and no more than
+once a minute per device; look for `saved the current settings to device memory` in the log.
+The save captures whatever is showing at that instant, so apply your colors and wait for that
+line before launching a game. `apply` never writes device memory. `docs\configuration.md`
+("Saving to device memory") has the full policy.
 
 ## Commands
 

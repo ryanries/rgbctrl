@@ -141,8 +141,9 @@ any lighting.
 Hardware effects normally live only until the device loses power. With
 `plugins.<name>.persist: true` (a privileged key) a resident `run` asks the plugin to save
 the current hardware settings of a device when all of these hold: a hardware effect was
-applied since the last save, rgbctrl has been running for at least 60 s, and the last save
-attempt of that device was at least 60 s ago. Plugins refuse while saving would be unsafe
+applied since the last save, the device's hardware effects have not changed for 60 s, rgbctrl
+has been running for at least 60 s, and the last save attempt of that device was at least 60 s
+ago. Plugins refuse while saving would be unsafe
 (the Keychron keyboard and the GPU while any of their zones receives host frames); rgbctrl
 retries later and warns once when a device has not been saved for 10 minutes. `apply`, `list`
 and stopping the scheduled task never save. Supported by `gigabyte_fusion2`, `gigabyte_gpu`
