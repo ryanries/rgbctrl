@@ -14,6 +14,10 @@ const pdh_success: u32 = 0;
 const sensor_cpu_load = "cpu.load";
 const sensor_cpu_frequency = "cpu.freq";
 const sensor_memory_load = "mem.load";
+// A failed cpu.freq sample keeps the last published value; this many failures in a row reopen the query.
+const frequency_reopen_after_failures: u32 = 5;
+// A late tick can land just after the previous one, and a rate counter read over a few milliseconds is noise.
+const frequency_min_sample_interval_ms: u64 = 500;
 
 const SystemTimes = struct {
     idle: u64,
@@ -59,6 +63,28 @@ fn clampFrequency(value: f64) f64 {
     return value;
 }
 
+const FailureStreak = struct {
+    count: u32 = 0,
+
+    // Returns true when the failed sample completes a run that should reopen the query.
+    fn recordFailure(self: *FailureStreak) bool {
+        self.count +|= 1;
+        return self.count % frequency_reopen_after_failures == 0;
+    }
+
+    // Returns how many samples in a row had failed before this good one.
+    fn recordSuccess(self: *FailureStreak) u32 {
+        const lost_samples = self.count;
+        self.count = 0;
+        return lost_samples;
+    }
+};
+
+fn isFrequencySampleDue(last_collect_ms: ?u64, now_ms: u64) bool {
+    const last = last_collect_ms orelse return true;
+    return now_ms -| last >= frequency_min_sample_interval_ms;
+}
+
 const Instance = struct {
     host: sdk.HostApi,
     cpu_times: ?SystemTimes = null,
@@ -70,6 +96,8 @@ const Instance = struct {
     frequency_mode: FrequencyMode = .actual,
     frequency_has_sample: bool = false,
     frequency_disabled: bool = false,
+    frequency_failures: FailureStreak = .{},
+    frequency_last_collect_ms: ?u64 = null,
     memory_load_disabled: bool = false,
 
     fn warnSensorFailure(self: *Instance, sensor_name: []const u8, status: u32) void {
@@ -99,6 +127,7 @@ const Instance = struct {
         self.base_frequency_counter = null;
         self.performance_counter = null;
         self.frequency_has_sample = false;
+        self.frequency_last_collect_ms = null;
     }
 
     fn openFrequencyQuery(self: *Instance) void {
@@ -155,44 +184,52 @@ const Instance = struct {
         return .{ .value = value.doubleValue };
     }
 
-    fn tickFrequency(self: *Instance) void {
-        if (self.frequency_disabled) return;
-        const query = self.frequency_query orelse return;
-        const status = win32.PdhCollectQueryData(query);
-        if (status != pdh_success) {
-            self.disableFrequency(status);
-            return;
+    fn readFrequency(self: *const Instance) CounterRead {
+        switch (self.frequency_mode) {
+            .actual => return switch (formattedCounterValue(self.actual_frequency_counter.?)) {
+                .value => |value| .{ .value = clampFrequency(value) },
+                .status => |failure_status| .{ .status = failure_status },
+            },
+            .fallback => {
+                const base = switch (formattedCounterValue(self.base_frequency_counter.?)) {
+                    .value => |value| value,
+                    .status => |failure_status| return .{ .status = failure_status },
+                };
+                const performance = switch (formattedCounterValue(self.performance_counter.?)) {
+                    .value => |value| value,
+                    .status => |failure_status| return .{ .status = failure_status },
+                };
+                return .{ .value = computeFallbackFrequency(base, performance) };
+            },
         }
+    }
+
+    fn failFrequencySample(self: *Instance, status: u32) void {
+        const reopen = self.frequency_failures.recordFailure();
+        if (self.frequency_failures.count == 1) self.host.debug("cpu.freq sample failed (status 0x{x:0>8}); keeping the last value", .{status});
+        if (!reopen) return;
+        self.host.warn("cpu.freq failed {d} samples in a row (last status 0x{x:0>8}); reopening the counter query", .{ self.frequency_failures.count, status });
+        self.closeFrequencyQuery();
+    }
+
+    fn tickFrequency(self: *Instance, now_ms: u64) void {
+        if (self.frequency_disabled) return;
+        if (self.frequency_query == null) self.openFrequencyQuery();
+        const query = self.frequency_query orelse return;
+        if (!isFrequencySampleDue(self.frequency_last_collect_ms, now_ms)) return;
+        self.frequency_last_collect_ms = now_ms;
+        const status = win32.PdhCollectQueryData(query);
+        if (status != pdh_success) return self.failFrequencySample(status);
         if (!self.frequency_has_sample) {
             self.frequency_has_sample = true;
             return;
         }
-        const frequency = switch (self.frequency_mode) {
-            .actual => switch (formattedCounterValue(self.actual_frequency_counter.?)) {
-                .value => |value| clampFrequency(value),
-                .status => |failure_status| {
-                    self.disableFrequency(failure_status);
-                    return;
-                },
-            },
-            .fallback => blk: {
-                const base = switch (formattedCounterValue(self.base_frequency_counter.?)) {
-                    .value => |value| value,
-                    .status => |failure_status| {
-                        self.disableFrequency(failure_status);
-                        return;
-                    },
-                };
-                const performance = switch (formattedCounterValue(self.performance_counter.?)) {
-                    .value => |value| value,
-                    .status => |failure_status| {
-                        self.disableFrequency(failure_status);
-                        return;
-                    },
-                };
-                break :blk computeFallbackFrequency(base, performance);
-            },
+        const frequency = switch (self.readFrequency()) {
+            .value => |value| value,
+            .status => |failure_status| return self.failFrequencySample(failure_status),
         };
+        const lost_samples = self.frequency_failures.recordSuccess();
+        if (lost_samples > 0) self.host.info("cpu.freq recovered after {d} failed samples", .{lost_samples});
         self.host.setSensor(sensor_cpu_frequency, frequency);
     }
 
@@ -248,10 +285,9 @@ fn deviceInfo(pointer: ?*anyopaque, device_index: u32) callconv(.c) ?*const abi.
 }
 
 fn tick(pointer: ?*anyopaque, now_ms: u64) callconv(.c) i32 {
-    _ = now_ms;
     const self = instanceFrom(pointer);
     self.tickCpuLoad();
-    self.tickFrequency();
+    self.tickFrequency(now_ms);
     self.tickMemoryLoad();
     return abi.status_ok;
 }
@@ -305,4 +341,24 @@ test "frequency values clamp outside the published range" {
     try std.testing.expectEqual(@as(f64, 0), clampFrequency(-1));
     try std.testing.expectEqual(@as(f64, 0), clampFrequency(std.math.nan(f64)));
     try std.testing.expectEqual(@as(f64, 65535), clampFrequency(100000));
+}
+
+test "failed frequency samples never disable the sensor and every fifth in a row reopens the query" {
+    var streak = FailureStreak{};
+    for (0..4) |_| try std.testing.expect(!streak.recordFailure());
+    try std.testing.expect(streak.recordFailure());
+    for (0..4) |_| try std.testing.expect(!streak.recordFailure());
+    try std.testing.expect(streak.recordFailure());
+    try std.testing.expectEqual(@as(u32, 10), streak.recordSuccess());
+    try std.testing.expectEqual(@as(u32, 0), streak.recordSuccess());
+    try std.testing.expect(!streak.recordFailure());
+    try std.testing.expectEqual(@as(u32, 1), streak.count);
+}
+
+test "frequency samples wait at least half a tick after the previous collection" {
+    try std.testing.expect(isFrequencySampleDue(null, 0));
+    try std.testing.expect(!isFrequencySampleDue(1000, 1001));
+    try std.testing.expect(!isFrequencySampleDue(1000, 1499));
+    try std.testing.expect(isFrequencySampleDue(1000, 1500));
+    try std.testing.expect(isFrequencySampleDue(1000, 2000));
 }

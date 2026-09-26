@@ -113,6 +113,10 @@ PC, and the log at `debug` level records every probe and response.
 - Publishes `cpu.load` (from GetSystemTimes), `cpu.freq` (performance counter
   "Processor Information(_Total)\Actual Frequency", with a fallback to frequency times
   performance) and `mem.load` (GlobalMemoryStatusEx).
+- A `cpu.freq` sample that fails is skipped and the sensor keeps its last value; after 5
+  failures in a row the counter query is reopened. Samples are taken at least 500 ms apart,
+  because a rate counter read over a shorter window is noise. `cpu.freq` is switched off (and
+  logged once) only when its counters cannot be opened at all.
 
 ## Sensors
 
