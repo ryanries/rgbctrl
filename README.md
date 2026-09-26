@@ -24,7 +24,7 @@ first-run checklist below and enable one device at a time.
 | Gigabyte X870E AORUS PRO ICE (ITE IT5711, USB 048D:5711) | 3 ARGB headers, 12 V RGB header, I/O cover, chipset | `gigabyte_fusion2` | set `leds` for each ARGB header |
 | Gigabyte AORUS RTX 5080 MASTER ICE (and other allowlisted Gigabyte GeForce cards) | fan rings and logos | `gigabyte_gpu` | RGB only; the LCD is not supported |
 | Corsair Vengeance RGB DDR5 | 10 LEDs per DIMM | `corsair_ddr5` | opt-in; needs PawnIO and elevation |
-| Keychron Q6 Max (3434:0860/0861/0862) | per-key RGB | `keychron` | per-key frames need firmware with the 0xA8 protocol |
+| Keychron Q6 Max (3434:0860/0861/0862) and Q6 HE (3434:0B60/0B61/0B62) | per-key RGB | `keychron` | USB cable only (cable mode); per-key frames need firmware with the 0xA8 protocol |
 | Sudokoo SK700V (381C:0003) | CPU temperature, power, load and frequency readout | `sudokoo_sk700v` | the display has no fan speed field |
 | AMD Ryzen (Zen and later) | sensors: `cpu.temp`, `cpu.ccd<N>.temp`, `cpu.power` | `amd_cpu` | needs PawnIO and elevation |
 | Windows | sensors: `cpu.load`, `cpu.freq`, `mem.load` | `windows_metrics` | |
@@ -198,8 +198,8 @@ are checked against pinned SHA-256 hashes before they are loaded.
 
 ## Known limitations
 
-- The RTX 5080 LCD, Super I/O fan control, the Keychron wireless dongle and DDR5 hardware
-  effects are not implemented.
+- The RTX 5080 LCD, Super I/O fan control, the Keychron wireless modes (2.4 GHz dongle and
+  Bluetooth) and DDR5 hardware effects are not implemented.
 - The SK700V display has no field for fan speed; it shows temperature, power, load and
   frequency.
 - Some Gigabyte motherboards can log `static via hardware` for every `gigabyte_fusion2` zone

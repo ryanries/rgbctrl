@@ -25,6 +25,9 @@ const products = [_]Product{
     .{ .product_id = 0x0860, .led_count = 108, .name = "Keychron Q6 Max ANSI" },
     .{ .product_id = 0x0861, .led_count = 109, .name = "Keychron Q6 Max ISO" },
     .{ .product_id = 0x0862, .led_count = 113, .name = "Keychron Q6 Max JIS" },
+    .{ .product_id = 0x0B60, .led_count = 108, .name = "Keychron Q6 HE ANSI" },
+    .{ .product_id = 0x0B61, .led_count = 109, .name = "Keychron Q6 HE ISO" },
+    .{ .product_id = 0x0B62, .led_count = 112, .name = "Keychron Q6 HE JIS" },
 };
 
 pub const ViaValue = enum(u8) {
@@ -352,6 +355,18 @@ test "extra id parser accepts four digit hex pairs and rejects malformed text" {
     try std.testing.expect(parseIdPair("3434-0860") == null);
     try std.testing.expect(parseIdPair("343:0860") == null);
     try std.testing.expect(parseIdPair("3434:086G") == null);
+}
+
+test "built-in products cover the Q6 Max and Q6 HE and other ids fall back to a generic name" {
+    try std.testing.expectEqual(@as(?u16, 108), defaultLedCount(0x0860));
+    try std.testing.expectEqual(@as(?u16, 108), defaultLedCount(0x0B60));
+    try std.testing.expectEqual(@as(?u16, 109), defaultLedCount(0x0B61));
+    try std.testing.expectEqual(@as(?u16, 112), defaultLedCount(0x0B62));
+    try std.testing.expectEqualStrings("Keychron Q6 HE ANSI", productName(0x0B60));
+    try std.testing.expect(isDefaultProduct(0x0B62));
+    try std.testing.expect(!isDefaultProduct(0x0B63));
+    try std.testing.expectEqual(@as(?u16, null), defaultLedCount(0x0B63));
+    try std.testing.expectEqualStrings("Keychron keyboard", productName(0x0B63));
 }
 
 test "packet builders produce exact raw HID reports" {

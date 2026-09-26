@@ -68,10 +68,19 @@ PC, and the log at `debug` level records every probe and response.
 
 ## keychron: keyboard lighting
 
-- Match: VID 3434 with PID 0860, 0861 or 0862 (Q6 Max ANSI, ISO, JIS), raw HID collection
-  0xFF60 / 0x61, 32-byte reports. More ids with `extra_ids` (a privileged key, array of
-  `"VVVV:PPPP"` strings). Opened exclusively; one request at a time.
-- Device `keyboard`, zone `keys` (108, 109 or 113 LEDs).
+- Match: VID 3434 with PID 0860, 0861 or 0862 (Q6 Max ANSI, ISO, JIS) or 0B60, 0B61 or 0B62
+  (Q6 HE ANSI, ISO, JIS), raw HID collection 0xFF60 / 0x61, 32-byte reports. More ids with
+  `extra_ids` (a privileged key, array of `"VVVV:PPPP"` strings). Opened exclusively; one
+  request at a time.
+- Wired only: connect the USB cable and set the keyboard's mode switch to cable. Over
+  Bluetooth the device path has a different form, and the 2.4 GHz dongle has its own id, so
+  neither matches.
+- Another Keychron keyboard: find the interface `HID\VID_3434&PID_xxxx&MI_01` whose hardware
+  ids include `HID_DEVICE_UP:FF60_U:0061` (Device Manager, or
+  `Get-PnpDevice -PresentOnly | Where-Object InstanceId -match 'VID_3434'`) and add
+  `"3434:xxxx"` to `extra_ids` in the base config. Such a keyboard needs firmware with the 0xA8
+  protocol, because LED counts are built in only for the ids above.
+- Device `keyboard`, zone `keys` (108, 109, 112 or 113 LEDs).
 - Hardware effects (VIA channel 3): off, static, breathing, cycle, rainbow (1 color).
 - Host frames need firmware with the 0xA8 per-key protocol (firmware 1.1 or later); the zone
   then accepts per-key colors but only one brightness for the whole keyboard, so darker keys
