@@ -46,6 +46,7 @@ const Instance = struct {
     extra_id_count: usize = 0,
     quiesce: protocol.Quiesce = .{},
     discovery_restarts: protocol.DiscoveryRestarts = .{},
+    rediscovery_blocked: bool = false,
     led_count: u16 = 0,
     led_x: [protocol.max_leds]u16 = [_]u16{0} ** protocol.max_leds,
     firmware_by_position: [protocol.max_leds]u8 = [_]u8{0} ** protocol.max_leds,
@@ -304,6 +305,15 @@ const Instance = struct {
     }
 
     fn discover(self: *Instance) IoError!void {
+        self.runDiscovery() catch |err| {
+            // Failed and Unsupported repeat on every attempt; only a rescan retries them.
+            if (err == error.Failed or err == error.Unsupported) self.rediscovery_blocked = true;
+            return err;
+        };
+        self.rediscovery_blocked = false;
+    }
+
+    fn runDiscovery(self: *Instance) IoError!void {
         try self.openHandle();
         var response: [protocol.payload_length]u8 = undefined;
         self.requestBasic(0x01, &response) catch |err| return self.discoveryFailure(err);
@@ -365,7 +375,7 @@ const Instance = struct {
     }
 
     fn rediscoverIfReady(self: *Instance) i32 {
-        if (self.verified or self.path_len == 0) return abi.status_ok;
+        if (self.verified or self.path_len == 0 or self.rediscovery_blocked) return abi.status_ok;
         self.discover() catch |err| {
             if (err == error.Busy) return abi.status_busy;
             if (err == error.DeviceLost) return abi.status_device_lost;

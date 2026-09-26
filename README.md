@@ -204,12 +204,9 @@ are checked against pinned SHA-256 hashes before they are loaded.
   Bluetooth) and DDR5 hardware effects are not implemented.
 - The SK700V display has no field for fan speed; it shows temperature, power, load and
   frequency.
-- On the X870E AORUS PRO ICE, `gigabyte_fusion2` logged `static via hardware` for every zone
-  with no error while the LEDs kept showing the board's factory effect, even with Windows
-  Dynamic Lighting off and no vendor software installed. rgbctrl now clears every effect slot
-  of the controller before its first write, as OpenRGB does; whether that fixes it is not yet
-  confirmed. If a board still shows its factory effect, a `log.level: trace` capture (it
-  records every feature report sent to and read from the controller) helps narrow it down.
+- The motherboard's `io_cover` and `chipset` zones are single-color in rgbctrl, although they
+  are addressable LED strips (`docs\devices.md`), so a host effect such as `rainbow` shows one
+  color across the whole zone.
 - `rgbctrl.exe` is about 160 KiB (163,328 bytes), above the 96 KiB target of the design; the
   plugins are 8 to 24 KiB, with `keychron.dll` exactly at the 24 KiB limit that CI enforces.
 

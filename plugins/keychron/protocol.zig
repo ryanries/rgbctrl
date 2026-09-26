@@ -8,7 +8,9 @@ pub const report_length = 33;
 const report_id: u8 = 0x00;
 pub const max_leds = 113;
 pub const row_count = 6;
-const column_count = 20;
+// The A8 06 reply has one byte per matrix column (21 on the Q6). The firmware answers in the
+// request buffer, so bytes past its last column echo the request, which is filled with 0xFF.
+const column_count = payload_length - 3;
 pub const chunk_leds = 9;
 pub const reply_timeout_ms: u32 = 250;
 const quiesce_quiet_ms: u64 = 1000;
@@ -147,12 +149,14 @@ pub fn buildA8(report: *[report_length]u8, subcommand: u8, arguments: []const u8
     const payload = clearReport(report);
     payload[0] = 0xA8;
     payload[1] = subcommand;
-    const count = @min(arguments.len, payload_length - 2);
+    const count: usize = @min(arguments.len, payload_length - 2);
     @memcpy(payload[2 .. 2 + count], arguments[0..count]);
 }
 
 pub fn buildLedRowRequest(report: *[report_length]u8, row: u8) void {
-    buildA8(report, 0x06, &.{ row, 0xFF, 0xFF, 0xFF });
+    var arguments = [_]u8{0xFF} ** (payload_length - 2);
+    arguments[0] = row;
+    buildA8(report, 0x06, &arguments);
 }
 
 pub fn buildLedColorRequest(report: *[report_length]u8, start: u8, colors: []const LedColor) void {
@@ -380,7 +384,8 @@ test "packet builders produce exact raw HID reports" {
     buildViaSave(&report);
     try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x09, 0x03 }, report[0..3]);
     buildLedRowRequest(&report, 5);
-    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0xA8, 0x06, 0x05, 0xFF, 0xFF, 0xFF }, report[0..7]);
+    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0xA8, 0x06, 0x05 }, report[0..4]);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0xFF} ** (payload_length - 3)), report[4..]);
 }
 
 test "A8 LED color packets carry up to nine HSV triplets" {
@@ -438,6 +443,33 @@ test "LED map builder converts A8 row replies to row-major order and X positions
     try std.testing.expectEqual(@as(u16, 0), map.led_x[0]);
     try std.testing.expectEqual(@as(u16, 32767), map.led_x[1]);
     try std.testing.expectEqual(@as(u16, 65535), map.led_x[2]);
+}
+
+test "LED map builder finds all 108 LEDs of the 21-column Q6 HE ANSI matrix" {
+    const n: u8 = 0xFF;
+    const matrix = [row_count][21]u8{
+        .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, n, 13, 14, 15, 16, 17, 18, 19 },
+        .{ 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40 },
+        .{ 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61 },
+        .{ 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, n, n, n, n, 75, 76, 77, n },
+        .{ 78, n, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, n, 89, n, 90, n, 91, 92, 93, 94 },
+        .{ 95, 96, 97, n, n, n, 98, n, n, 99, 100, 101, 102, n, 103, 104, 105, 106, 107, n, n },
+    };
+    var builder = LedMapBuilder.init(108);
+    for (matrix, 0..) |columns, row| {
+        var request: [report_length]u8 = undefined;
+        buildLedRowRequest(&request, @intCast(row));
+        var reply: [payload_length]u8 = request[1..].*;
+        reply[2] = 0;
+        @memcpy(reply[3 .. 3 + columns.len], &columns);
+        try builder.appendRow(&reply);
+    }
+    const map = try builder.finish();
+    try std.testing.expectEqual(@as(u16, 108), map.led_count);
+    try std.testing.expectEqual(@as(u8, 19), map.firmware_by_position[19]);
+    try std.testing.expectEqual(@as(u16, 65535), map.led_x[19]);
+    try std.testing.expectEqual(@as(u8, 94), map.firmware_by_position[94]);
+    try std.testing.expectEqual(@as(u16, 65535), map.led_x[94]);
 }
 
 test "LED map builder rejects duplicate out of range and incomplete rows" {

@@ -16,8 +16,8 @@ PC, and the log at `debug` level records every probe and response.
 |---|---|---|
 | `argb1`, `argb2`, `argb3` | 0..256, set with `leds` | 5 V ARGB headers; host frames and hardware effects |
 | `rgb12v` | 1 | 12 V RGB header |
-| `io_cover` | 1 | I/O shroud |
-| `chipset` | 1 | chipset heatsink |
+| `io_cover` | 1 | I/O shroud; OpenRGB drives it as an 8-LED strip on firmware 1.0.19.5, rgbctrl as one color |
+| `chipset` | 1 | chipset heatsink; OpenRGB drives it as a 4-LED strip on firmware 1.0.19.5, rgbctrl as one color |
 
 - Hardware effects: off, static, breathing, flash, cycle (1 color). Host frames on every zone
   (single-LED zones at most 15 frames per second).
@@ -30,9 +30,10 @@ PC, and the log at `debug` level records every probe and response.
   and the mask of host-streamed headers. After start, resume or reconnect (not after resizing),
   every effect slot is also cleared between LampArray and beat mode (`CC 20`..`CC 27` and
   `CC 90`..`CC 92`, each an empty effect with no zones) and all zones are applied
-  (`CC 28 FF 07`), as OpenRGB does when it opens the board. Zones left untouched (`none`, the
-  default) are cleared as well instead of keeping the effect stored on the board, so give every
-  zone you want lit an effect.
+  (`CC 28 FF 07`), as OpenRGB does when it opens the board. Without it the X870E AORUS PRO ICE
+  (firmware 1.0.19.5) kept its factory rainbow on every zone although every write succeeded.
+  Zones left untouched (`none`, the default) are cleared as well instead of keeping the effect
+  stored on the board, so give every zone you want lit an effect.
 - `persist`: `CC 47 01`, `CC 5E 00`.
 - Conflicts: Gigabyte Control Center / RGB Fusion, OpenRGB, SignalRGB.
 
@@ -94,7 +95,12 @@ PC, and the log at `debug` level records every probe and response.
   show at the brightest key's level (a warning is logged once). Without 0xA8 the zone is
   hardware-only. At most 30 frames per second.
 - Discovery: `01`, `A1`, `A2`, and with 0xA8 support `A8 01`, `A8 05` and the key map
-  `A8 06` for rows 0..5.
+  `A8 06` for rows 0..5. The firmware answers `A8 06` in the request buffer with one byte per
+  matrix column (21 on the Q6), so the request is padded with 0xFF ("no LED") and every column
+  of the reply is read.
+- A discovery that fails for a reason other than a timeout (for example an incomplete key map)
+  is logged once and retried only after the next device change (such as reconnecting the
+  keyboard) or resume.
 - A request that gets no reply within 250 ms aborts the sequence; the plugin then waits until
   the keyboard has been quiet for 1 s (at most 5 s) before it starts over; three failed
   restarts count as a lost device.
