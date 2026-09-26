@@ -26,7 +26,23 @@
     "motherboard": {
       "argb1": { "leds": 30 },
       "argb2": { "leds": 30 },
-      "argb3": { "effect": "none" }
+      "argb3": { "effect": "none" },
+
+      // Onboard single-LED zones. These can ship running a factory rainbow,
+      // strobe or breathing effect that persists until each zone is set
+      // explicitly, so pin them here instead of relying on the "*" wildcard:
+      //   io_cover - the AORUS logo on the I/O shield
+      //   chipset  - the heatsink LED near the F_PANEL header
+      "io_cover": { "effect": "static", "color": "#0000FF" },
+      "chipset": { "effect": "static", "color": "#0000FF" }
+    },
+
+    // The GPU fan rings can likewise hold a factory rainbow until each fan zone
+    // is set explicitly. Add "logo_side"/"logo_top"/"extra" if yours need it.
+    "gpu": {
+      "fan_left": { "effect": "static", "color": "#0000FF" },
+      "fan_middle": { "effect": "static", "color": "#0000FF" },
+      "fan_right": { "effect": "static", "color": "#0000FF" }
     }
   },
 
