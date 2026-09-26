@@ -21,6 +21,10 @@ pub const command_persist_flag: u8 = 0x47;
 pub const command_lamp_array: u8 = 0x48;
 pub const command_save: u8 = 0x5E;
 
+pub const all_zones_mask: u32 = 0x07FF;
+/// Every effect slot of the IT5711, including 0x20..0x23 and 0x90, which no zone of this board uses.
+pub const effect_slots = [_]u8{ 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x90, 0x91, 0x92 };
+
 pub const Zone = enum(u8) {
     argb1 = 0,
     argb2 = 1,
@@ -90,6 +94,7 @@ pub const Calibration = struct {
 const Identification = struct {
     firmware: [28]u8,
     firmware_len: usize,
+    firmware_version: [4]u8,
     led_count_class_shadow: [3]u8,
     feature_flags: u8,
     calibrations: [zone_count]Calibration,
@@ -124,6 +129,10 @@ pub fn buildRequest(packet: *[report_length]u8, command: u8) void {
 pub fn buildSimpleValue(packet: *[report_length]u8, command: u8, value: u8) void {
     buildRequest(packet, command);
     packet[2] = value;
+}
+
+pub fn buildSlotClear(packet: *[report_length]u8, slot: u8) void {
+    buildRequest(packet, slot);
 }
 
 pub fn buildApply(packet: *[report_length]u8, mask: u32) void {
@@ -255,6 +264,7 @@ pub fn parseIdentification(info_response: []const u8, extended_response: []const
     var result = Identification{
         .firmware = [_]u8{0} ** 28,
         .firmware_len = 0,
+        .firmware_version = info_response[4..8].*,
         .led_count_class_shadow = .{ info_response[8], info_response[9], info_response[10] },
         .feature_flags = info_response[11],
         .calibrations = undefined,
@@ -297,6 +307,7 @@ test "identification parser extracts firmware classes flags and all zone calibra
     var extended = [_]u8{0} ** report_length;
     info[0] = report_id;
     info[1] = 1;
+    @memcpy(info[4..8], &[_]u8{ 0x04, 0x03, 0x02, 0x01 });
     info[8] = 0x21;
     info[9] = 0x43;
     info[10] = 0x65;
@@ -313,6 +324,7 @@ test "identification parser extracts firmware classes flags and all zone calibra
     @memcpy(extended[16..20], &grb);
     const identification = try parseIdentification(&info, &extended);
     try std.testing.expectEqualStrings("IT5711 V1.2", identification.firmware[0..identification.firmware_len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0x04, 0x03, 0x02, 0x01 }, &identification.firmware_version);
     try std.testing.expectEqualSlices(u8, &.{ 0x21, 0x43, 0x65 }, &identification.led_count_class_shadow);
     try std.testing.expectEqual(@as(u8, 0x03), identification.feature_flags);
     try std.testing.expect(identification.calibrations[zoneIndex(.rgb12v)].enabled);
@@ -361,7 +373,7 @@ test "simple command packet builders produce exact feature reports" {
     buildSimpleValue(&packet, command_lamp_array, 0);
     try std.testing.expectEqualSlices(u8, &.{ report_id, command_lamp_array, 0 }, packet[0..3]);
     try expectZeroTail(packet, 3);
-    buildApply(&packet, 0x000007FF);
+    buildApply(&packet, all_zones_mask);
     try std.testing.expectEqualSlices(u8, &.{ report_id, command_apply, 0xFF, 0x07, 0, 0 }, packet[0..6]);
     try expectZeroTail(packet, 6);
     buildDirectMask(&packet, 0x0B);
@@ -377,6 +389,18 @@ test "stream packet uses byte offsets byte counts and calibration order" {
     buildStreamPacket(&packet, 0x58, 6, &.{ .{ .r = 0x12, .g = 0x34, .b = 0x56 }, .{ .r = 0xAA, .g = 0xBB, .b = 0xCC } }, .{ .positions = .{ 2, 0, 1 } });
     try std.testing.expectEqualSlices(u8, &.{ report_id, 0x58, 0x06, 0x00, 0x06, 0x34, 0x12, 0x56, 0xBB, 0xAA, 0xCC }, packet[0..11]);
     try expectZeroTail(packet, 11);
+}
+
+test "slot clear covers every zone slot and sends an empty effect with no zones" {
+    for (zone_specs) |zone_spec| {
+        try std.testing.expect(std.mem.indexOfScalar(u8, &effect_slots, zone_spec.slot) != null);
+        try std.testing.expect((all_zones_mask & zone_spec.apply_mask) == zone_spec.apply_mask);
+    }
+    try std.testing.expectEqualSlices(u8, &.{ 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x90, 0x91, 0x92 }, &effect_slots);
+    var packet = [_]u8{0xAA} ** report_length;
+    buildSlotClear(&packet, 0x22);
+    try std.testing.expectEqualSlices(u8, &.{ report_id, 0x22 }, packet[0..2]);
+    try expectZeroTail(packet, 2);
 }
 
 test "slot packet for off at speeds 0 50 100 ignores color and uses static black" {

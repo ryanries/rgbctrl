@@ -45,6 +45,7 @@ const Instance = struct {
     host_stream_mask: u8 = 0,
     pending_direct_mask: bool = false,
     first_write_init_pending: bool = true,
+    slot_reset_pending: bool = true,
 
     fn initialize(self: *Instance) void {
         for (protocol.zone_specs, 0..) |zone_spec, index| {
@@ -127,6 +128,8 @@ const Instance = struct {
 
     fn setFeature(self: *Instance, packet: *[protocol.report_length]u8) OpenResult!void {
         if (self.device) |*device| {
+            var hex: [3 * protocol.report_length]u8 = undefined;
+            self.host.trace("feature write {s}", .{sdk.text.hexBytes(&hex, std.mem.trimEnd(u8, packet, &.{0}))});
             device.setFeature(packet) catch |err| {
                 self.host.warn("Gigabyte Fusion2 HID feature write failed: {s} (Win32 error {d})", .{ @errorName(err), device.last_error });
                 return error.DeviceLost;
@@ -148,6 +151,8 @@ const Instance = struct {
                 self.host.warn("Gigabyte Fusion2 HID feature read returned {d} bytes instead of {d}", .{ transferred, protocol.report_length });
                 return error.DeviceLost;
             }
+            var hex: [3 * protocol.report_length]u8 = undefined;
+            self.host.trace("feature read {s}", .{sdk.text.hexBytes(&hex, std.mem.trimEnd(u8, packet, &.{0}))});
             return;
         }
         return error.DeviceLost;
@@ -174,8 +179,11 @@ const Instance = struct {
         self.firmware = identification.firmware;
         self.firmware_len = identification.firmware_len;
         self.calibrations = identification.calibrations;
+        const version = identification.firmware_version;
+        self.host.debug("controller firmware \"{s}\" version {d}.{d}.{d}.{d}, feature flags 0x{x:0>2}", .{ self.firmware[0..self.firmware_len], version[0], version[1], version[2], version[3], self.feature_flags });
         self.applyCapabilities();
         self.first_write_init_pending = true;
+        self.slot_reset_pending = true;
     }
 
     fn applyCapabilities(self: *Instance) void {
@@ -207,6 +215,27 @@ const Instance = struct {
                     self.present = false;
                     return abi.status_device_lost;
                 };
+            }
+            if (self.slot_reset_pending) {
+                // Only after (re)identification: the host then re-applies every zone, whereas a
+                // resize re-arms first_write_init_pending and would wipe zones already written.
+                var clear_packet: [protocol.report_length]u8 = undefined;
+                for (protocol.effect_slots) |slot| {
+                    protocol.buildSlotClear(&clear_packet, slot);
+                    self.setFeature(&clear_packet) catch {
+                        self.closeHandle();
+                        self.present = false;
+                        return abi.status_device_lost;
+                    };
+                }
+                protocol.buildApply(&clear_packet, protocol.all_zones_mask);
+                self.setFeature(&clear_packet) catch {
+                    self.closeHandle();
+                    self.present = false;
+                    return abi.status_device_lost;
+                };
+                self.slot_reset_pending = false;
+                self.host.debug("cleared every effect slot before the first lighting write", .{});
             }
             var beat_packet: [protocol.report_length]u8 = undefined;
             protocol.buildSimpleValue(&beat_packet, protocol.command_beat, 0);

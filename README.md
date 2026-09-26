@@ -68,7 +68,9 @@ to copy such a build into the protected program folder.
    the installed `rgbctrl.exe`, or add `--allow-insecure-install` for a one-off test.
 4. Create your configuration at `%LOCALAPPDATA%\rgbctrl\rgbctrl.json`. Start from
    `rgbctrl.example.json` and keep only the devices you want to change; zones that are not
-   mentioned are left untouched. `docs\configuration.md` describes every key.
+   mentioned are left untouched, except that the Gigabyte motherboard clears all of its zones
+   before rgbctrl first writes to it (see `docs\devices.md`). `docs\configuration.md`
+   describes every key.
 5. `rgbctrl apply` applies hardware effects and one frame of host effects and exits;
    `rgbctrl run` keeps animating, updates the SK700V display every second and reloads the
    configuration when you save it. Stop it with Ctrl+C or `rgbctrl stop`.
@@ -202,11 +204,12 @@ are checked against pinned SHA-256 hashes before they are loaded.
   Bluetooth) and DDR5 hardware effects are not implemented.
 - The SK700V display has no field for fan speed; it shows temperature, power, load and
   frequency.
-- Some Gigabyte motherboards can log `static via hardware` for every `gigabyte_fusion2` zone
-  with no error while the LEDs keep showing the board's factory effect, even with Windows
-  Dynamic Lighting off and no vendor software installed (seen on the X870E AORUS PRO ICE, IT5711
-  firmware 0x0003). The root cause is still open; a `log.level: trace` capture, plus testing an
-  ARGB header with `"effect": "off"` and with `"engine": "host"`, help narrow it down.
+- On the X870E AORUS PRO ICE, `gigabyte_fusion2` logged `static via hardware` for every zone
+  with no error while the LEDs kept showing the board's factory effect, even with Windows
+  Dynamic Lighting off and no vendor software installed. rgbctrl now clears every effect slot
+  of the controller before its first write, as OpenRGB does; whether that fixes it is not yet
+  confirmed. If a board still shows its factory effect, a `log.level: trace` capture (it
+  records every feature report sent to and read from the controller) helps narrow it down.
 - `rgbctrl.exe` is about 160 KiB (163,328 bytes), above the 96 KiB target of the design; the
   plugins are 8 to 24 KiB, with `keychron.dll` exactly at the 24 KiB limit that CI enforces.
 

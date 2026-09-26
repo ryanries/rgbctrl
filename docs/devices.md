@@ -21,11 +21,18 @@ PC, and the log at `debug` level records every probe and response.
 
 - Hardware effects: off, static, breathing, flash, cycle (1 color). Host frames on every zone
   (single-LED zones at most 15 frames per second).
-- Discovery: `CC 60` then a feature read, `CC 61` then a feature read (firmware string, LED
-  count classes, color order calibration and feature flags). A header whose calibration is
-  all zero gets no capabilities and a warning.
-- First lighting write after start, resume or resizing: LampArray off when the firmware has
-  it, the LED count classes of the resized headers, and the mask of host-streamed headers.
+- Discovery: `CC 60` then a feature read, `CC 61` then a feature read (firmware string and
+  version, LED count classes, color order calibration and feature flags). A header whose
+  calibration is all zero gets no capabilities and a warning. The firmware string, version and
+  feature flags are logged at `debug`, and every feature report at `trace`.
+- First lighting write after start, resume, reconnect or resizing: LampArray off when the
+  firmware has it, beat mode off (`CC 31 00`), the LED count classes of the resized headers,
+  and the mask of host-streamed headers. After start, resume or reconnect (not after resizing),
+  every effect slot is also cleared between LampArray and beat mode (`CC 20`..`CC 27` and
+  `CC 90`..`CC 92`, each an empty effect with no zones) and all zones are applied
+  (`CC 28 FF 07`), as OpenRGB does when it opens the board. Zones left untouched (`none`, the
+  default) are cleared as well instead of keeping the effect stored on the board, so give every
+  zone you want lit an effect.
 - `persist`: `CC 47 01`, `CC 5E 00`.
 - Conflicts: Gigabyte Control Center / RGB Fusion, OpenRGB, SignalRGB.
 
