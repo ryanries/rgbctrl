@@ -100,6 +100,41 @@ Stopping the task terminates the process without that cleanup. The log of the ta
 folder and the Event Log source and keeps both configuration files. Upgrades are an uninstall
 followed by an install.
 
+## Making hardware effects survive gaming and reboots
+
+`static`, `breathing`, `flash` and `cycle` on the Gigabyte motherboard and GPU run as
+*hardware* effects: rgbctrl writes them once into the controller's volatile memory. When an RGB
+controller resets it reloads the profile stored inside it, which is usually the vendor's
+rainbow. rgbctrl re-applies automatically after system sleep and resume, but two cases it
+cannot cover on its own:
+
+- The GPU waking from idle to run a game. The moment the fans spin up, the card's RGB
+  controller resets and reloads its stored rainbow, and rgbctrl gets no power-state signal to
+  re-assert, so the colors stay reverted until the next config reload or restart.
+- A reboot. The controllers power up showing their stored profile until the rgbctrl task starts
+  and applies your config.
+
+Enable `persist` for the Gigabyte plugins so rgbctrl saves the applied effect into the
+controller's non-volatile memory; the controller then reloads your colors on a reset instead of
+the rainbow. `persist` is a privileged key, so it belongs in the admin-only base config
+`%ProgramData%\rgbctrl\rgbctrl.json` (the user config can only tighten it). Merge it with
+whatever is already there:
+
+```json
+{
+  "plugins": {
+    "gigabyte_gpu":     { "persist": true },
+    "gigabyte_fusion2": { "persist": true }
+  }
+}
+```
+
+A resident `run` saves roughly 60 s after an effect is applied, and no more than once a minute
+per device; look for `saved the current settings to device memory` in the log. The save
+captures whatever is showing at that instant, so apply your colors and wait for that line before
+launching a game. `apply` never writes device memory. `docs\configuration.md` ("Saving to
+device memory") has the full policy.
+
 ## Commands
 
 ```
@@ -167,6 +202,17 @@ are checked against pinned SHA-256 hashes before they are loaded.
   effects are not implemented.
 - The SK700V display has no field for fan speed; it shows temperature, power, load and
   frequency.
+- On the Gigabyte GPU, single-color hardware effects (`static`, `breathing`, `flash`, `cycle`)
+  light only the first LED of a multi-LED zone: the 8-LED fan rings show a single lit LED, while
+  the single-LED logos look correct. The effect packet carries an LED count equal to the number
+  of colors supplied (one) instead of the zone's LED count (`buildBlackwellHardwarePacket` in
+  `plugins\gigabyte_gpu\protocol.zig`). Streaming host frames (`"engine": "host"`) lights the
+  whole ring, but those cannot be saved with `persist` and revert on the next controller reset.
+- Some Gigabyte motherboards can log `static via hardware` for every `gigabyte_fusion2` zone
+  with no error while the LEDs keep showing the board's factory effect, even with Windows
+  Dynamic Lighting off and no vendor software installed (seen on the X870E AORUS PRO ICE, IT5711
+  firmware 0x0003). The root cause is still open; a `log.level: trace` capture, plus testing an
+  ARGB header with `"effect": "off"` and with `"engine": "host"`, help narrow it down.
 - `rgbctrl.exe` is about 160 KiB (163,328 bytes), above the 96 KiB target of the design; the
   plugins are 8 to 24 KiB, with `keychron.dll` exactly at the 24 KiB limit that CI enforces.
 
