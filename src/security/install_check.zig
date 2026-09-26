@@ -246,6 +246,7 @@ fn finalPathProblem(path: [:0]const u16) ?Problem {
     if (!win32.isValid(handle)) return .{ .open_failed = win32.GetLastError() };
     defer _ = win32.CloseHandle(handle);
     var buffer: [path_capacity]u16 = undefined;
+    // Normalized name, not opened: CreateFileW follows intermediate reparse points, and normalization exposes that.
     const length = win32.GetFinalPathNameByHandleW(handle, &buffer, buffer.len, win32.FILE_NAME_NORMALIZED | win32.VOLUME_NAME_DOS);
     if (length == 0 or length >= buffer.len) return .path_mismatch;
     var final_path: []const u16 = buffer[0..length];

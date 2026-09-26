@@ -61,9 +61,12 @@ fn fullPath(buffer: []u16, path: [*:0]const u16) Error![:0]const u16 {
     return buffer[0..length :0];
 }
 
+const file_name_opened: u32 = 0x8;
+
 fn finalPathMatches(handle: win32.HANDLE, expected_full_path: []const u16) Error!void {
     var buffer: [1024]u16 = undefined;
-    const length = win32.GetFinalPathNameByHandleW(handle, &buffer, buffer.len, win32.FILE_NAME_NORMALIZED | win32.VOLUME_NAME_DOS);
+    // Opened name, not normalized: OBJ_DONT_REPARSE already blocks redirection, so only 8.3 or case spellings differ.
+    const length = win32.GetFinalPathNameByHandleW(handle, &buffer, buffer.len, file_name_opened | win32.VOLUME_NAME_DOS);
     if (length == 0) return error.Failed;
     if (length >= buffer.len) return error.PathTooLong;
     var final_path: []const u16 = buffer[0..length];
@@ -363,4 +366,31 @@ test "a junction anywhere in the path is refused without being followed" {
     try testing.expectError(error.ReparsePoint, openUntrusted(linked.ptr));
     try testing.expect(stampUntrusted(linked.ptr).exists == false);
     try testing.expect(stampUntrusted(inside.ptr).exists);
+}
+
+extern "kernel32" fn GetShortPathNameW(long_path: [*:0]const u16, short_path: [*]u16, length: u32) callconv(.winapi) u32;
+
+test "openUntrusted accepts a path spelled with 8.3 short names" {
+    var directory_buffer: [600]u16 = undefined;
+    const directory = try temporaryPath(&directory_buffer, "rgbctrl short name test directory");
+    var file_buffer: [700]u16 = undefined;
+    const file = try temporaryPath(&file_buffer, "rgbctrl short name test directory\\rgbctrl short name config.json");
+    _ = win32.DeleteFileW(file.ptr);
+    _ = RemoveDirectoryW(directory.ptr);
+    if (win32.CreateDirectoryW(directory.ptr, null) == 0) return error.SkipZigTest;
+    defer _ = RemoveDirectoryW(directory.ptr);
+    try createFileWithContent(file, "{}");
+    defer _ = win32.DeleteFileW(file.ptr);
+    var short_buffer: [700]u16 = undefined;
+    const length = GetShortPathNameW(file.ptr, &short_buffer, short_buffer.len);
+    if (length == 0 or length >= short_buffer.len) return error.SkipZigTest;
+    short_buffer[length] = 0;
+    const short = short_buffer[0..length :0];
+    if (std.mem.eql(u16, short, file)) return error.SkipZigTest;
+    const opened = try openUntrusted(short.ptr);
+    defer opened.close();
+    const content = try readAll(testing.allocator, opened.handle, 1024);
+    defer testing.allocator.free(content);
+    try testing.expectEqualStrings("{}", content);
+    try testing.expect(stampUntrusted(short.ptr).exists);
 }
