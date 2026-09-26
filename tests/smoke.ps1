@@ -20,12 +20,39 @@ Copy-Item "$testPlugins\*.dll" "$work\bin\plugins\"
 $exe = "$work\bin\rgbctrl.exe"
 $log = "$work\bin\rgbctrl.log"
 $failures = [System.Collections.Generic.List[string]]::new()
+# GitHub-hosted Windows runners run elevated, and an elevated rgbctrl refuses to start from this
+# user-writable temp folder (exit 4). The flag lets it continue; unelevated it has no effect.
+$developmentFlag = "--allow-insecure-install"
+$flaggedCommands = @("run", "apply", "list")
+$failureContext = $null
+
+function Set-FailureContext([string]$Command, $Result) {
+    $script:failureContext = [pscustomobject]@{ Command = $Command; Result = $Result; Reported = $false }
+}
+
+function Write-FailureContext {
+    $context = $script:failureContext
+    if (-not $context -or $context.Reported) { return }
+    $context.Reported = $true
+    Write-Host "  last command: rgbctrl $($context.Command)"
+    if ($context.Result) {
+        Write-Host "  exit code: $($context.Result.Code)"
+        foreach ($line in ("$($context.Result.Output)".TrimEnd() -split "\r?\n" | Select-Object -First 20)) { Write-Host "  output| $line" }
+    }
+    $logText = "$(Get-LogText)".TrimEnd()
+    if (-not $logText) { Write-Host "  log| (no log file)"; return }
+    foreach ($line in ($logText -split "\r?\n" | Select-Object -Last 20)) { Write-Host "  log| $line" }
+}
 
 function Test-Condition([string]$Name, [bool]$Condition) {
-    if ($Condition) { Write-Host "PASS $Name" } else { Write-Host "FAIL $Name"; $failures.Add($Name) }
+    if ($Condition) { Write-Host "PASS $Name"; return }
+    Write-Host "FAIL $Name"
+    $failures.Add($Name)
+    Write-FailureContext
 }
 
 function Invoke-Rgbctrl([string[]]$Arguments) {
+    if ($Arguments.Count -gt 0 -and $flaggedCommands -contains $Arguments[0]) { $Arguments = $Arguments + $developmentFlag }
     $previousPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
@@ -35,7 +62,9 @@ function Invoke-Rgbctrl([string[]]$Arguments) {
     finally {
         $ErrorActionPreference = $previousPreference
     }
-    return [pscustomobject]@{ Code = $code; Output = $output }
+    $result = [pscustomobject]@{ Code = $code; Output = $output }
+    Set-FailureContext ($Arguments -join " ") $result
+    return $result
 }
 
 function Get-LogText {
@@ -57,7 +86,8 @@ function Wait-LogPattern([string]$Pattern, [int]$Seconds) {
 }
 
 function Start-Resident([string]$Config) {
-    return Start-Process -FilePath $exe -ArgumentList @("run", "--config", "`"$Config`"") -PassThru -WindowStyle Hidden
+    Set-FailureContext "run --config $Config $developmentFlag" $null
+    return Start-Process -FilePath $exe -ArgumentList @("run", "--config", "`"$Config`"", $developmentFlag) -PassThru -WindowStyle Hidden
 }
 
 function Stop-Resident($Process, [int]$TimeoutMs) {
