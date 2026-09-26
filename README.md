@@ -202,12 +202,6 @@ are checked against pinned SHA-256 hashes before they are loaded.
   effects are not implemented.
 - The SK700V display has no field for fan speed; it shows temperature, power, load and
   frequency.
-- On the Gigabyte GPU, single-color hardware effects (`static`, `breathing`, `flash`, `cycle`)
-  light only the first LED of a multi-LED zone: the 8-LED fan rings show a single lit LED, while
-  the single-LED logos look correct. The effect packet carries an LED count equal to the number
-  of colors supplied (one) instead of the zone's LED count (`buildBlackwellHardwarePacket` in
-  `plugins\gigabyte_gpu\protocol.zig`). Streaming host frames (`"engine": "host"`) lights the
-  whole ring, but those cannot be saved with `persist` and revert on the next controller reset.
 - Some Gigabyte motherboards can log `static via hardware` for every `gigabyte_fusion2` zone
   with no error while the LEDs keep showing the board's factory effect, even with Windows
   Dynamic Lighting off and no vendor software installed (seen on the X870E AORUS PRO ICE, IT5711
