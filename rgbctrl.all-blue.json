@@ -1,0 +1,45 @@
+{
+  // Sample profile: turn every device solid blue with no animation.
+  // Handy during bring-up to confirm each device responds.
+  //
+  // Note: RAM (corsair_ddr5) is opt-in and only lights when enabled in the
+  // admin-only base file (%ProgramData%\rgbctrl\rgbctrl.json) with PawnIO
+  // installed. The keyboard must be detected first (wired, matching id) before
+  // these settings reach it; run "rgbctrl list" to see what was found.
+  "log": {
+    "level": "debug",
+    "file": "rgbctrl.log",
+    "max_size_kb": 1024
+  },
+
+  "frame_rate": 30,
+
+  "lighting": {
+    // Every device, every zone: pure static blue at full brightness.
+    // Add "brightness": 1..100 here to dim it.
+    "*": {
+      "*": { "effect": "static", "color": "#0000FF" }
+    },
+
+    // The ARGB headers are resizable and show nothing at 0 LEDs, so give them a
+    // length. Adjust the counts to match your strips/fans; argb3 is left untouched.
+    "motherboard": {
+      "argb1": { "leds": 30 },
+      "argb2": { "leds": 30 },
+      "argb3": { "effect": "none" }
+    }
+  },
+
+  "plugins": {
+    // The SK700V cooler display keeps showing CPU stats (it has no RGB zones).
+    "sudokoo_sk700v": {
+      "temp_sensor": "cpu.temp",
+      "power_sensor": "cpu.power",
+      "load_sensor": "cpu.load",
+      "freq_sensor": "cpu.freq",
+      "temperature_unit": "C",
+      "power_bar_max_watts": 162,
+      "blank_on_exit": true
+    }
+  }
+}
