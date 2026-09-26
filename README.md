@@ -14,9 +14,8 @@ either once (`apply`) or resident (`run`, for example as a SYSTEM scheduled task
   Windows itself (and the PawnIO driver for the features that need it).
 
 Status: all protocol code is unit tested with byte vectors taken from the protocol research,
-and the host is tested end to end with a virtual device (`tests\smoke.ps1`), but nothing has
-been tested on the real hardware yet. Follow the first-run checklist below and enable one
-device at a time.
+and the host is tested end to end with a virtual device (`tests\smoke.ps1`). Follow the
+first-run checklist below and enable one device at a time.
 
 ## Supported hardware
 
@@ -164,7 +163,6 @@ are checked against pinned SHA-256 hashes before they are loaded.
 
 ## Known limitations
 
-- Not yet tested on the real hardware (see the checklist above).
 - The RTX 5080 LCD, Super I/O fan control, the Keychron wireless dongle and DDR5 hardware
   effects are not implemented.
 - The SK700V display has no field for fan speed; it shows temperature, power, load and
