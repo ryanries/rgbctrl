@@ -22,12 +22,13 @@ first-run checklist below and enable one device at a time.
 | Part | What rgbctrl controls | Plugin | Notes |
 |---|---|---|---|
 | Gigabyte X870E AORUS PRO ICE (ITE IT5711, USB 048D:5711) | 3 ARGB headers, 12 V RGB header, I/O cover, chipset | `gigabyte_fusion2` | set `leds` for each ARGB header |
-| Gigabyte AORUS RTX 5080 MASTER ICE (and other allowlisted Gigabyte GeForce cards) | fan rings and logos | `gigabyte_gpu` | RGB only; the LCD is not supported |
+| Gigabyte AORUS RTX 5080 MASTER ICE (and other allowlisted Gigabyte GeForce cards) | fan rings and logos; on the 5080 MASTER ICE also GPU readings on the LCD (opt-in) | `gigabyte_gpu` | see "GPU readings on the RTX 5080 LCD" |
 | Corsair Vengeance RGB DDR5 | 10 LEDs per DIMM | `corsair_ddr5` | opt-in; needs PawnIO and elevation |
 | Keychron Q6 Max (3434:0860/0861/0862) and Q6 HE (3434:0B60/0B61/0B62) | per-key RGB | `keychron` | USB cable only (cable mode); per-key frames need firmware with the 0xA8 protocol |
 | Sudokoo SK700V (381C:0003) | CPU temperature, power, load and frequency readout | `sudokoo_sk700v` | the display has no fan speed field |
 | AMD Ryzen (Zen and later) | sensors: `cpu.temp`, `cpu.ccd<N>.temp`, `cpu.power` | `amd_cpu` | needs PawnIO and elevation |
 | Windows | sensors: `cpu.load`, `cpu.freq`, `mem.load` | `windows_metrics` | |
+| NVIDIA GeForce | sensors: `gpu.temp`, `gpu.load`, `gpu.power`, `gpu.fan`, `gpu.freq`, `gpu.mem.freq`, `gpu.mem.load` | `nvidia_gpu` | the first NVIDIA GPU, through the driver's NVML |
 
 `docs\devices.md` has the details for every device: zone names, supported effects, what the
 plugin sends during discovery, and known conflicts.
@@ -137,6 +138,40 @@ The save captures whatever is showing at that instant, so apply your colors and 
 line before launching a game. `apply` never writes device memory. `docs\configuration.md`
 ("Saving to device memory") has the full policy.
 
+## GPU readings on the RTX 5080 LCD
+
+The LCD of the AORUS RTX 5080 MASTER ICE can overlay live GPU readings on its built-in
+screens and rotate through them. rgbctrl switches that overlay on and feeds it the values that
+`nvidia_gpu` reads from the NVIDIA driver once a second, sending them again when they change
+visibly and at least every 30 s. It never uploads images and never saves anything into the
+panel.
+
+The feature is opt-in: it talks to the LCD controller on the card's I2C bus with a protocol
+that open-source projects reverse-engineered from Gigabyte Control Center. Turn it on in the
+admin-only base config `%ProgramData%\rgbctrl\rgbctrl.json`:
+
+```json
+{ "plugins": { "gigabyte_gpu": { "lcd": true } } }
+```
+
+The readouts, the seconds each one stays up and the built-in screen can go in either file:
+
+```json
+{ "plugins": { "gigabyte_gpu": { "lcd_metrics": ["temp", "load", "fan", "power"], "lcd_seconds": 4, "lcd_screen": 1 } } }
+```
+
+- `lcd_metrics` accepts `temp`, `clock`, `load`, `fan`, `vram_clock`, `vram` and `power`.
+  The panel also has an FPS field, which rgbctrl cannot fill.
+- The panel shows only what rgbctrl sends. When rgbctrl stops feeding it (`rgbctrl stop`, or a
+  config change that turns `lcd` off or reloads the plugin), the overlay goes and the panel
+  returns to the screen it showed before, switching off again if it was off; when the process
+  is killed, the last values stay on the panel.
+- Each update holds the card's I2C bus for a few milliseconds. rgbctrl skips updates while the
+  shown values barely change, but a game can still hitch briefly when one is sent, as some
+  users report with Gigabyte's own software. Remove `lcd` if that bothers you.
+- With `lcd` on, all of the card's I2C traffic, lighting included, runs at 400 kHz, as
+  Gigabyte's software does.
+
 ## Commands
 
 ```
@@ -188,9 +223,9 @@ be modified by anyone else (`--allow-insecure-install` overrides this for develo
 It never reads configuration from its own folder. The user config file is treated as
 untrusted when elevated: it is opened without following links or junctions anywhere in its
 path, a `plugins` section with more than 256 entries is ignored, and it can only make the
-privileged keys more restrictive; those keys (`enabled`, `persist`, `extra_ids` and
-`sudokoo_sk700v.exclusive`) take effect from the admin-only base file only. PawnIO modules
-are checked against pinned SHA-256 hashes before they are loaded.
+privileged keys more restrictive; those keys (`enabled`, `persist`, `extra_ids`,
+`sudokoo_sk700v.exclusive` and `gigabyte_gpu.lcd`) take effect from the admin-only base file
+only. PawnIO modules are checked against pinned SHA-256 hashes before they are loaded.
 
 ## Documentation
 
@@ -200,8 +235,12 @@ are checked against pinned SHA-256 hashes before they are loaded.
 
 ## Known limitations
 
-- The RTX 5080 LCD, Super I/O fan control, the Keychron wireless modes (2.4 GHz dongle and
-  Bluetooth) and DDR5 hardware effects are not implemented.
+- Images, text and GIFs on the RTX 5080 LCD, Super I/O fan control, the Keychron wireless
+  modes (2.4 GHz dongle and Bluetooth) and DDR5 hardware effects are not implemented.
+- The GPU LCD readout supports only the RTX 5080 AORUS MASTER ICE. Its protocol was confirmed on
+  that card by an open-source driver, which draws the overlay on an uploaded image; that the
+  overlay also works on the built-in screens is documented only for the RTX 5090 MASTER.
+  `lcd_screen` picks one of the three built-in screens.
 - The SK700V display has no field for fan speed; it shows temperature, power, load and
   frequency.
 - The motherboard's `io_cover` and `chipset` zones are single-color in rgbctrl, although they
@@ -211,7 +250,7 @@ are checked against pinned SHA-256 hashes before they are loaded.
   the first new color, while `persist` was saving to flash within 30 ms of each change; a
   reboot cleared it. rgbctrl now saves only after a device's effects have been unchanged for
   60 s. If a zone still stops responding, reboot the PC.
-- `rgbctrl.exe` is about 160 KiB (163,328 bytes), above the 96 KiB target of the design; the
+- `rgbctrl.exe` is about 160 KiB (163,840 bytes), above the 96 KiB target of the design; the
   plugins are 8 to 24 KiB, with `keychron.dll` exactly at the 24 KiB limit that CI enforces.
 
 ## License

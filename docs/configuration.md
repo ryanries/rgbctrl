@@ -54,16 +54,17 @@ without a reopen.
 
 ### Privileged keys
 
-`plugins.<name>.enabled`, `plugins.<name>.persist`, `plugins.<name>.extra_ids` and
-`plugins.sudokoo_sk700v.exclusive` widen what rgbctrl may touch. When rgbctrl runs elevated or
-as SYSTEM, their value comes from the built-in default and then the base file only, and only
-if the base file and its folder are admin-only (`rgbctrl check-install` shows the verdict).
-The user file may still make them more restrictive (`enabled: false`, `persist: false`,
-`exclusive: true`, or a subset of the trusted `extra_ids`); anything else, including `null`,
-is ignored with a warning. While elevated, the user file is also opened without following
-links or junctions anywhere in its path, and an untrusted `plugins` section (in the user file,
-or in a base file that is not admin-only) with more than 256 entries is ignored as a whole
-with a warning. When rgbctrl runs unelevated both files are trusted.
+`plugins.<name>.enabled`, `plugins.<name>.persist`, `plugins.<name>.extra_ids`,
+`plugins.sudokoo_sk700v.exclusive` and `plugins.gigabyte_gpu.lcd` widen what rgbctrl may
+touch. When rgbctrl runs elevated or as SYSTEM, their value comes from the built-in default and
+then the base file only, and only if the base file and its folder are admin-only
+(`rgbctrl check-install` shows the verdict). The user file may still make them more
+restrictive (`enabled: false`, `persist: false`, `lcd: false`, `exclusive: true`, or a subset
+of the trusted `extra_ids`); anything else, including `null`, is ignored with a warning. While
+elevated, the user file is also opened without following links or junctions anywhere in its
+path, and an untrusted `plugins` section (in the user file, or in a base file that is not
+admin-only) with more than 256 entries is ignored as a whole with a warning. When rgbctrl runs
+unelevated both files are trusted.
 
 ## Lighting
 
@@ -164,7 +165,8 @@ admin-only by `scripts\install.ps1`, with an empty `plugins` object), for exampl
   "plugins": {
     "corsair_ddr5": { "enabled": true },
     "keychron": { "persist": true, "extra_ids": ["3434:0870"] },
-    "gigabyte_fusion2": { "persist": true }
+    "gigabyte_fusion2": { "persist": true },
+    "gigabyte_gpu": { "persist": true, "lcd": true }
   }
 }
 ```

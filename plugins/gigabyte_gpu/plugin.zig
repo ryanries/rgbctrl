@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const sdk = @import("sdk");
 const protocol = @import("protocol.zig");
+const lcd = @import("lcd.zig");
 const abi = sdk.abi;
 
 comptime {
@@ -95,11 +96,37 @@ const Candidate = struct {
     identity: protocol.PciIdentity,
 };
 
+const lcd_retry_ms: u64 = 30_000;
+const lcd_reprobe_after_failures: u32 = 3;
+
+const LcdSearch = enum { found, no_card, no_answer };
+
+const LcdPanel = struct {
+    enabled: bool = false,
+    flags: u8 = lcd.default_metrics,
+    seconds: u8 = lcd.default_seconds,
+    screen: lcd.Mode = .faith1,
+    // The card of the panel; kept when a later probe fails, so close() can still restore it.
+    handle: ?sdk.nvapi.GpuHandle = null,
+    found: bool = false,
+    original: ?lcd.PanelState = null,
+    setup_pending: bool = true,
+    active: bool = false,
+    warned: bool = false,
+    retry_at_ms: u64 = 0,
+    failures: u32 = 0,
+    last_sent: ?lcd.Encoded = null,
+    last_sent_ms: u64 = 0,
+    last_tick_ms: u64 = 0,
+    holds: [8]lcd.SensorHold = [_]lcd.SensorHold{.{}} ** 8,
+};
+
 const Instance = struct {
     host: sdk.HostApi,
     nvapi: ?sdk.nvapi.Nvapi = null,
     devices: [max_devices]Device = undefined,
     device_count: usize = 0,
+    lcd: LcdPanel = .{},
 
     fn discover(self: *Instance, reprobe_present: bool) i32 {
         var api = &(self.nvapi orelse return abi.status_ok);
@@ -194,7 +221,216 @@ const Instance = struct {
         }
         return abi.status_ok;
     }
+
+    fn configRange(self: *Instance, config: ?*const abi.Json, key: []const u8, default: u8, min: u8, max: u8, problem: []const u8) u8 {
+        const node = self.host.member(config, key) orelse return default;
+        const value = self.host.asNumber(node) orelse {
+            self.host.logMessage(.warn, problem);
+            return default;
+        };
+        const rounded = sdk.text.roundToInt(i64, value);
+        if (rounded < min or rounded > max) {
+            self.host.logMessage(.warn, problem);
+            return default;
+        }
+        return @intCast(rounded);
+    }
+
+    fn readLcdConfig(self: *Instance, config: ?*const abi.Json) void {
+        const enabled = self.host.member(config, "lcd") orelse return;
+        self.lcd.enabled = self.host.asBool(enabled) orelse {
+            self.host.logMessage(.warn, "lcd must be true or false; the GPU LCD stays off");
+            return;
+        };
+        if (!self.lcd.enabled) return;
+        self.lcd.seconds = self.configRange(config, "lcd_seconds", lcd.default_seconds, 1, 60, "lcd_seconds must be a number from 1 to 60; using 4");
+        self.lcd.screen = @enumFromInt(self.configRange(config, "lcd_screen", 1, 1, 3, "lcd_screen must be 1, 2 or 3; using 1") - 1);
+        const node = self.host.member(config, "lcd_metrics") orelse return;
+        if (self.host.kind(node) != abi.json_array) {
+            self.host.logMessage(.warn, "lcd_metrics must be an array of names; using temp, load, fan and power");
+            return;
+        }
+        var flags: u8 = 0;
+        const length = self.host.length(node);
+        var index: u32 = 0;
+        while (index < length) : (index += 1) {
+            const metric = if (self.host.asString(self.host.at(node, index))) |name| lcd.parseMetric(name) else null;
+            if (metric) |value| {
+                flags |= lcd.bit(value);
+            } else {
+                self.host.logMessage(.warn, "an lcd_metrics entry is not temp, clock, load, fan, vram_clock, vram or power; ignored");
+            }
+        }
+        if (flags == 0) {
+            self.host.logMessage(.warn, "lcd_metrics selects nothing; using temp, load, fan and power");
+            return;
+        }
+        self.lcd.flags = flags;
+    }
+
+    fn findLcd(self: *Instance) LcdSearch {
+        var api = &(self.nvapi orelse return .no_card);
+        self.lcd.found = false;
+        var handles: [sdk.nvapi.max_gpus]?sdk.nvapi.GpuHandle = undefined;
+        const count = api.gpus(&handles);
+        var saw_card = false;
+        for (handles[0..count]) |maybe_handle| {
+            const handle = maybe_handle orelse continue;
+            const pci = api.pciIds(handle) orelse continue;
+            if (!lcd.supports(pci.device(), pci.subvendor(), pci.subdevice())) continue;
+            saw_card = true;
+            var frame: [lcd.frame_length]u8 = undefined;
+            var reply: [lcd.reply_length]u8 = undefined;
+            lcd.buildReadFirmware(&frame);
+            if (!api.writeThenRead(handle, lcd.address, &frame, &reply)) {
+                if (!self.lcd.warned) self.host.logMessage(.warn, "the GPU LCD did not answer the firmware query; retrying every 30 s");
+                continue;
+            }
+            const firmware = lcd.parseFirmware(&reply) orelse {
+                if (!self.lcd.warned) self.host.logMessage(.warn, "the GPU LCD firmware reply is not recognized; the LCD stays untouched");
+                continue;
+            };
+            // Once rgbctrl switched screens, DE reports its own screen, not the one to restore.
+            if (!self.lcd.active) {
+                self.lcd.original = readPanelState(api, handle);
+                if (self.lcd.original == null) self.host.logMessage(.warn, "the GPU LCD did not report its screen; the readout goes on the screen it shows now");
+            }
+            self.lcd.handle = handle;
+            self.lcd.found = true;
+            self.lcd.setup_pending = true;
+            self.lcd.last_sent = null;
+            self.lcd.warned = false;
+            const digits = "0123456789ABCDEF";
+            const version = [_]u8{ 'F', digits[firmware >> 4], '.', digits[firmware & 0xF] };
+            var names: [64]u8 = undefined;
+            var seconds: [3]u8 = undefined;
+            logParts(self.host, .info, &.{ "GPU LCD firmware ", &version, " found; in run it shows ", lcd.describe(&names, self.lcd.flags), " for ", decimal(&seconds, self.lcd.seconds), " s each" });
+            return .found;
+        }
+        if (!saw_card) {
+            if (!self.lcd.warned) self.host.logMessage(.warn, "lcd is on, but no GPU with a supported LCD (RTX 5080 AORUS MASTER ICE) was found");
+            self.lcd.warned = true;
+            return .no_card;
+        }
+        self.lcd.warned = true;
+        return .no_answer;
+    }
+
+    fn writeLcd(self: *Instance, handle: sdk.nvapi.GpuHandle, frame: *const [lcd.frame_length]u8) bool {
+        var api = &self.nvapi.?;
+        if (api.write(handle, lcd.address, frame)) return true;
+        if (self.lcd.failures == 0) self.host.logMessage(.warn, "GPU LCD write failed; retrying in 30 s");
+        return false;
+    }
+
+    fn setupLcd(self: *Instance, handle: sdk.nvapi.GpuHandle) bool {
+        // Set before the first command, so close() also undoes a setup that failed halfway.
+        self.lcd.active = true;
+        var frame: [lcd.frame_length]u8 = undefined;
+        lcd.buildOpen(&frame, true);
+        if (!self.writeLcd(handle, &frame)) return false;
+        lcd.buildOverlay(&frame, 0, 0);
+        if (!self.writeLcd(handle, &frame)) return false;
+        // A screen that could not be read could not be restored either, so it stays.
+        if (self.lcd.original != null) {
+            lcd.buildSetMode(&frame, self.lcd.screen);
+            if (!self.writeLcd(handle, &frame)) return false;
+            sdk.win32.Sleep(300);
+        }
+        lcd.buildOverlay(&frame, self.lcd.flags, self.lcd.seconds);
+        if (!self.writeLcd(handle, &frame)) return false;
+        self.host.logMessage(.debug, "GPU LCD overlay switched on");
+        return true;
+    }
+
+    fn lcdFailed(self: *Instance, now_ms: u64) void {
+        self.lcd.failures += 1;
+        self.lcd.setup_pending = true;
+        self.lcd.retry_at_ms = now_ms + lcd_retry_ms;
+    }
+
+    fn tickLcd(self: *Instance, now_ms: u64) void {
+        if (!self.lcd.enabled or self.nvapi == null or self.host.mode() != abi.mode_run) return;
+        // After sleep every reading is as old as the sleep, which restarts the grace instead of
+        // reporting the sensors missing.
+        if (now_ms -| self.lcd.last_tick_ms > lcd.hold_ms) {
+            for (&self.lcd.holds) |*hold| hold.restart(now_ms);
+        }
+        self.lcd.last_tick_ms = now_ms;
+        if (now_ms < self.lcd.retry_at_ms) return;
+        var readings = [_]f64{0} ** 8;
+        var waiting = true;
+        for (lcd.metric_sensors, 0..) |name, index| {
+            if ((self.lcd.flags >> @intCast(index)) & 1 == 0) continue;
+            const reading: ?lcd.SensorHold.Reading = if (self.host.getSensor(name)) |sensor| .{ .value = sensor.value, .age_ms = sensor.age_ms } else null;
+            const resolution = self.lcd.holds[index].resolve(reading, now_ms);
+            if (resolution.became_unavailable) logParts(self.host, .warn, &.{ "sensor ", name, " unavailable; the GPU LCD shows 0 for it" });
+            if (!resolution.pending) waiting = false;
+            readings[index] = resolution.value;
+        }
+        // The panel is left alone until nvidia_gpu delivers or the sensors' grace time is over.
+        if (waiting) return;
+        if (!self.lcd.found or self.lcd.failures >= lcd_reprobe_after_failures) {
+            self.lcd.failures = 0;
+            const search = self.findLcd();
+            // A card that vanishes while the readout is up may come back after a driver reset.
+            if (search == .no_card and !self.lcd.active) {
+                self.lcd.enabled = false;
+                return;
+            }
+            if (search != .found) {
+                self.lcd.retry_at_ms = now_ms + lcd_retry_ms;
+                return;
+            }
+        }
+        const handle = self.lcd.handle orelse return;
+        if (self.lcd.setup_pending) {
+            if (!self.setupLcd(handle)) return self.lcdFailed(now_ms);
+            self.lcd.setup_pending = false;
+            self.lcd.last_sent = null;
+        }
+        const encoded = lcd.encode(self.lcd.flags, readings);
+        if (self.lcd.last_sent) |previous| {
+            if (!lcd.worthSending(self.lcd.flags, previous, encoded) and now_ms -| self.lcd.last_sent_ms < lcd.refresh_after_ms) return;
+        }
+        var frame: [lcd.frame_length]u8 = undefined;
+        lcd.buildValues(&frame, encoded);
+        if (!self.writeLcd(handle, &frame)) return self.lcdFailed(now_ms);
+        self.lcd.last_sent = encoded;
+        self.lcd.last_sent_ms = now_ms;
+        self.lcd.failures = 0;
+    }
+
+    fn restoreLcd(self: *Instance) void {
+        if (!self.lcd.active) return;
+        var api = &(self.nvapi orelse return);
+        const handle = self.lcd.handle orelse return;
+        var frame: [lcd.frame_length]u8 = undefined;
+        lcd.buildOverlay(&frame, 0, 0);
+        _ = api.write(handle, lcd.address, &frame);
+        const original = self.lcd.original orelse return;
+        if (original.mode != self.lcd.screen) {
+            lcd.buildSetMode(&frame, original.mode);
+            _ = api.write(handle, lcd.address, &frame);
+        }
+        if (original.on) return;
+        sdk.win32.Sleep(300);
+        lcd.buildOpen(&frame, false);
+        _ = api.write(handle, lcd.address, &frame);
+    }
 };
+
+fn readPanelState(api: *sdk.nvapi.Nvapi, handle: sdk.nvapi.GpuHandle) ?lcd.PanelState {
+    var frame: [lcd.frame_length]u8 = undefined;
+    var reply: [lcd.reply_length]u8 = undefined;
+    lcd.buildReadMode(&frame);
+    for (0..3) |_| {
+        if (api.writeThenRead(handle, lcd.address, &frame, &reply)) {
+            if (lcd.parseState(&reply)) |state| return state;
+        }
+    }
+    return null;
+}
 
 fn assignIds(devices: []Device) void {
     for (devices, 0..) |*device, index| {
@@ -250,6 +486,28 @@ fn appendText(buffer: []u8, start: usize, text: []const u8) usize {
     return start + text.len;
 }
 
+fn logParts(host: sdk.HostApi, level: abi.LogLevel, parts: []const []const u8) void {
+    var buffer: [192]u8 = undefined;
+    var length: usize = 0;
+    for (parts) |part| {
+        const count = @min(part.len, buffer.len - length);
+        length = appendText(&buffer, length, part[0..count]);
+    }
+    host.logMessage(level, buffer[0..length]);
+}
+
+fn decimal(buffer: *[3]u8, value: u8) []const u8 {
+    var remaining = value;
+    var start: usize = buffer.len;
+    while (true) {
+        start -= 1;
+        buffer[start] = '0' + remaining % 10;
+        remaining /= 10;
+        if (remaining == 0) break;
+    }
+    return buffer[start..];
+}
+
 fn appendHex16(buffer: []u8, start: usize, value: u16) usize {
     const digits = "0123456789ABCDEF";
     buffer[start] = digits[(value >> 12) & 0xF];
@@ -271,11 +529,11 @@ fn instanceFrom(pointer: ?*anyopaque) *Instance {
 }
 
 fn open(host: *const abi.Host, config: ?*const abi.Json, instance_out: *?*anyopaque) callconv(.c) i32 {
-    _ = config;
     panic_host = host;
     sdk.panic.hook = reportPanic;
     const self = std.heap.page_allocator.create(Instance) catch return abi.status_fail;
     self.* = .{ .host = .{ .host = host } };
+    self.readLcdConfig(config);
     self.nvapi = sdk.nvapi.Nvapi.load() catch |err| {
         switch (err) {
             error.NotInstalled => self.host.logMessage(.debug, "NVAPI unavailable (no NVIDIA driver); gigabyte_gpu has nothing to do"),
@@ -285,7 +543,11 @@ fn open(host: *const abi.Host, config: ?*const abi.Json, instance_out: *?*anyopa
         instance_out.* = self;
         return abi.status_ok;
     };
+    // Gigabyte's LCD service runs the card's I2C bus at 400 kHz; RGB writes at another speed
+    // on the same bus were reported to wedge it, so every transaction uses 400 kHz then.
+    if (self.lcd.enabled) self.nvapi.?.speed = sdk.nvapi.i2c_speed_400khz;
     _ = self.discover(true);
+    if (self.lcd.enabled and self.findLcd() == .no_card) self.lcd.enabled = false;
     instance_out.* = self;
     return abi.status_ok;
 }
@@ -293,6 +555,9 @@ fn open(host: *const abi.Host, config: ?*const abi.Json, instance_out: *?*anyopa
 fn close(pointer: ?*anyopaque, reason: u32) callconv(.c) void {
     _ = reason;
     const self = instanceFrom(pointer);
+    // A reopen may come with lcd off or the plugin disabled, and nothing would feed the
+    // readout after this, so it never stays up frozen.
+    self.restoreLcd();
     if (self.nvapi) |*api| api.deinit();
     std.heap.page_allocator.destroy(self);
 }
@@ -392,11 +657,18 @@ fn flush(pointer: ?*anyopaque, device_index: u32) callconv(.c) i32 {
     return abi.status_ok;
 }
 
+fn tick(pointer: ?*anyopaque, now_ms: u64) callconv(.c) i32 {
+    instanceFrom(pointer).tickLcd(now_ms);
+    return abi.status_ok;
+}
+
 fn rescan(pointer: ?*anyopaque, reason: u32) callconv(.c) i32 {
     const self = instanceFrom(pointer);
     switch (reason) {
         abi.rescan_resume => {
             for (self.devices[0..self.device_count]) |*device| device.markResume();
+            self.lcd.setup_pending = true;
+            self.lcd.retry_at_ms = 0;
             return abi.status_ok;
         },
         abi.rescan_recover => return self.discover(false),
@@ -424,6 +696,7 @@ fn persist(pointer: ?*anyopaque, device_index: u32) callconv(.c) i32 {
 const plugin = abi.Plugin{
     .name = "gigabyte_gpu",
     .version = "0.1.0",
+    .tick_interval_ms = 1000,
     .transports = abi.transport_i2c,
     .open = open,
     .close = close,
@@ -432,6 +705,7 @@ const plugin = abi.Plugin{
     .set_hw_effect = setHwEffect,
     .set_leds = setLeds,
     .flush = flush,
+    .tick = tick,
     .rescan = rescan,
     .persist = persist,
 };
@@ -443,6 +717,15 @@ export fn rgbctrl_plugin_entry(host_abi_version: u32) callconv(.c) ?*const abi.P
 
 test {
     _ = protocol;
+    _ = lcd;
+}
+
+test "decimal writes every u8 without leading zeros" {
+    var buffer: [3]u8 = undefined;
+    try std.testing.expectEqualStrings("0", decimal(&buffer, 0));
+    try std.testing.expectEqualStrings("4", decimal(&buffer, 4));
+    try std.testing.expectEqualStrings("60", decimal(&buffer, 60));
+    try std.testing.expectEqualStrings("255", decimal(&buffer, 255));
 }
 
 test "device info pointers refer to the device's own storage after the device moves" {

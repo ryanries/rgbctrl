@@ -12,6 +12,9 @@ pub const id_i2c_read_ex: u32 = 0x4D7B0709;
 pub const max_gpus = 64;
 pub const gpu_port: u8 = 1;
 pub const i2c_info_version: u32 = @sizeOf(I2cInfoV3) | (3 << 16);
+// NV_I2C_SPEED values: the default keeps the bus at its current speed.
+pub const i2c_speed_default: u32 = 0;
+pub const i2c_speed_400khz: u32 = 6;
 
 pub const GpuHandle = *anyopaque;
 
@@ -91,6 +94,7 @@ pub const Nvapi = struct {
     i2c_read: I2cFn,
     bus_lock: ?win32.HANDLE,
     last_status: i32 = 0,
+    speed: u32 = i2c_speed_default,
 
     pub fn load() LoadError!Nvapi {
         const bus_lock = win32.CreateMutexW(null, win32.FALSE, win32.L("Local\\rgbctrl.nvapi.i2c")) orelse return error.BusLockUnavailable;
@@ -153,7 +157,7 @@ pub const Nvapi = struct {
         if (!self.lock()) return false;
         defer self.unlock();
         if (!self.writeLocked(gpu, address7, request)) return false;
-        var info = I2cInfoV3{ .i2c_dev_address = wireAddress(address7), .data = response.ptr, .size = @intCast(response.len) };
+        var info = I2cInfoV3{ .i2c_dev_address = wireAddress(address7), .data = response.ptr, .size = @intCast(response.len), .speed_khz = self.speed };
         var extra = [2]u32{ 0, 0 };
         self.last_status = self.i2c_read(gpu, &info, &extra);
         return self.last_status == 0;
@@ -163,7 +167,7 @@ pub const Nvapi = struct {
         var copy: [256]u8 = undefined;
         if (data.len > copy.len) return false;
         @memcpy(copy[0..data.len], data);
-        var info = I2cInfoV3{ .i2c_dev_address = wireAddress(address7), .data = &copy, .size = @intCast(data.len) };
+        var info = I2cInfoV3{ .i2c_dev_address = wireAddress(address7), .data = &copy, .size = @intCast(data.len), .speed_khz = self.speed };
         var extra = [2]u32{ 0, 0 };
         self.last_status = self.i2c_write(gpu, &info, &extra);
         return self.last_status == 0;

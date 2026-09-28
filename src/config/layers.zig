@@ -14,13 +14,15 @@ const Merged = struct {
 };
 
 const exclusive_plugin = "sudokoo_sk700v";
+const lcd_plugin = "gigabyte_gpu";
 const common_privileged_keys = [_][]const u8{ "enabled", "persist", "extra_ids" };
 
 fn isPrivileged(plugin: []const u8, key: []const u8) bool {
     for (common_privileged_keys) |privileged| {
         if (std.mem.eql(u8, key, privileged)) return true;
     }
-    return std.mem.eql(u8, plugin, exclusive_plugin) and std.mem.eql(u8, key, "exclusive");
+    if (std.mem.eql(u8, plugin, exclusive_plugin) and std.mem.eql(u8, key, "exclusive")) return true;
+    return std.mem.eql(u8, plugin, lcd_plugin) and std.mem.eql(u8, key, "lcd");
 }
 
 fn merge(arena: std.mem.Allocator, lower: ?*const json.Node, upper: ?*const json.Node) error{OutOfMemory}!?*const json.Node {
@@ -200,7 +202,10 @@ fn warnRemoval(diagnostics: *Diagnostics, node: *const json.Node, layer: []const
 
 fn applicableKeys(plugin: []const u8) []const []const u8 {
     const with_exclusive = comptime common_privileged_keys ++ [_][]const u8{"exclusive"};
-    return if (std.mem.eql(u8, plugin, exclusive_plugin)) &with_exclusive else &common_privileged_keys;
+    const with_lcd = comptime common_privileged_keys ++ [_][]const u8{"lcd"};
+    if (std.mem.eql(u8, plugin, exclusive_plugin)) return &with_exclusive;
+    if (std.mem.eql(u8, plugin, lcd_plugin)) return &with_lcd;
+    return &common_privileged_keys;
 }
 
 fn appendUnique(arena: std.mem.Allocator, list: *std.ArrayList([]const u8), value: []const u8) error{OutOfMemory}!void {
@@ -300,6 +305,26 @@ test "while elevated an untrusted layer cannot widen extra_ids, remove trusted v
     try testing.expect(privilegedValue(untrusted_base.root, "keychron", "persist") == null);
     try testing.expect(privilegedValue(untrusted_base.root, "keychron", "extra_ids") == null);
     try testing.expect(untrusted_diagnostics.contains("plugins.keychron.persist in the base config was ignored"));
+}
+
+test "while elevated only the trusted base can turn on the GPU LCD and the user layer can turn it off" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var diagnostics = Diagnostics.init(arena);
+    const empty_base = try parseTestDocument(arena, "{}");
+    const enable = try parseTestDocument(arena, "{\"plugins\": {\"gigabyte_gpu\": {\"lcd\": true, \"lcd_seconds\": 6}}}");
+    const refused = try mergeLayers(arena, .{ .label = "base", .root = empty_base, .trusted = true }, .{ .label = "user", .root = enable, .trusted = false }, true, &diagnostics);
+    try testing.expect(privilegedValue(refused.root, "gigabyte_gpu", "lcd") == null);
+    try testing.expectEqual(@as(f64, 6), privilegedValue(refused.root, "gigabyte_gpu", "lcd_seconds").?.number().?);
+    try testing.expect(diagnostics.contains("plugins.gigabyte_gpu.lcd in the user config was ignored"));
+
+    const trusted_base = try parseTestDocument(arena, "{\"plugins\": {\"gigabyte_gpu\": {\"lcd\": true}}}");
+    const disable = try parseTestDocument(arena, "{\"plugins\": {\"gigabyte_gpu\": {\"lcd\": false}}}");
+    const kept = try mergeLayers(arena, .{ .label = "base", .root = trusted_base, .trusted = true }, .{ .label = "user", .root = null, .trusted = false }, true, &diagnostics);
+    try testing.expect(privilegedValue(kept.root, "gigabyte_gpu", "lcd").?.boolean().?);
+    const tightened = try mergeLayers(arena, .{ .label = "base", .root = trusted_base, .trusted = true }, .{ .label = "user", .root = disable, .trusted = false }, true, &diagnostics);
+    try testing.expect(!privilegedValue(tightened.root, "gigabyte_gpu", "lcd").?.boolean().?);
 }
 
 test "decide treats null and wrong types from an untrusted layer as ignored attempts" {

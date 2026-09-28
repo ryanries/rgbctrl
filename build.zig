@@ -8,6 +8,7 @@ const plugin_names = [_][]const u8{
     "sudokoo_sk700v",
     "amd_cpu",
     "windows_metrics",
+    "nvidia_gpu",
 };
 
 const c_plugin_variants = [_]struct { name: []const u8, define: ?[]const u8 }{

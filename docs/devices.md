@@ -42,7 +42,7 @@ PC, and the log at `debug` level records every probe and response.
 - Match: NVIDIA GPUs whose full PCI identity (device and subsystem) is on the allowlist from
   the protocol research, over NVAPI I2C port 1. The RGB controller is probed only at 7-bit
   address 0x71 (older cards, 8-byte packets) or 0x75 (Blackwell, 64-byte packets); the LCD
-  controller at 0x61 is never touched.
+  controller at 0x61 is touched only with `lcd` (below).
 - Devices: the first allowlisted card (in PCI identity order) is `gpu`; any further card is
   `gpu_<subsystem id>` (for example `gpu_418c`), with `_2`, `_3` appended when that name is
   already taken. NVAPI transactions are serialized with `Local\rgbctrl.nvapi.i2c`; without it
@@ -57,8 +57,28 @@ PC, and the log at `debug` level records every probe and response.
   after a failed write probes only the card that failed.
 - `persist`: `AA` (older) or `13 01` (Blackwell); refused while any zone of the card receives
   host frames, because the card saves all zones at once.
-- Not supported: the LCD on the MASTER card.
-- Conflicts: Gigabyte Control Center, AORUS Engine, OpenRGB.
+- LCD readout (privileged key `lcd`, off by default; RTX 5080 AORUS MASTER ICE, PCI
+  10DE:2C02 subsystem 1458:418C, only): 256-byte frames `<opcode> CB 55 AC 38 <arguments>`,
+  zero-padded, at 7-bit address 0x61; with `lcd` on, all of the plugin's I2C runs at 400 kHz.
+  At start `D6` reads the firmware (the reply must start with `D6`, or the LCD stays untouched)
+  and `DE` the current screen and whether the panel is on (up to three tries). In `run`, once a
+  sensor has a value: `E7 01` (panel on), `E1` with no fields, `E5` (the built-in screen; left
+  out when `DE` never answered, so the screen stays as it is), `E1` (the fields and the seconds
+  per readout), then `E3` with the values once a second. An `E3` is skipped while no shown
+  value moved by 1 C, 2 %, 50 RPM, 3 W, 15 MHz or 1 % of VRAM, but is sent at least every 30 s.
+  When the plugin closes after that (exit, or a reopen for a config change), `E1` with no
+  fields, `E5` with the original screen and `E7 02` if the panel was off. Uploads (`F1`, `F2`)
+  and the save command (`AA`) are never sent, so nothing is written to the panel's flash. A
+  failed write is retried every 30 s, and the LCD is probed again after three failures in a
+  row.
+- LCD keys: `lcd_metrics` (`["temp", "load", "fan", "power"]`; also `clock`, `vram_clock` and
+  `vram`), `lcd_seconds` (4, 1..60) and `lcd_screen` (built-in screen 1..3, 1). The values come
+  from the `nvidia_gpu` sensors `gpu.temp`, `gpu.freq`, `gpu.load`, `gpu.fan`, `gpu.mem.freq`,
+  `gpu.mem.load` and `gpu.power`; a sensor that stops updating keeps its last value for 10 s,
+  one that has not appeared yet gets the same 10 s, and then it shows 0 (logged once). The
+  panel's FPS field stays 0.
+- Conflicts: Gigabyte Control Center (including its `AorusLcdService` for the LCD), AORUS
+  Engine, OpenRGB.
 
 ## corsair_ddr5: memory lighting (opt-in)
 
@@ -139,6 +159,14 @@ PC, and the log at `debug` level records every probe and response.
   failures in a row the counter query is reopened. Samples are taken at least 500 ms apart,
   because a rate counter read over a shorter window is noise. `cpu.freq` is switched off (and
   logged once) only when its counters cannot be opened at all.
+
+## nvidia_gpu: NVIDIA GPU sensors
+
+- Loads `nvml.dll` of the NVIDIA driver from System32 only and reads the first NVIDIA GPU every
+  second. Without the driver or a GPU it logs that once and publishes nothing.
+- Publishes `gpu.temp` (C), `gpu.load` (%), `gpu.power` (W), `gpu.fan` (RPM of the fastest
+  fan), `gpu.freq` (graphics clock, MHz), `gpu.mem.freq` (memory clock, MHz) and `gpu.mem.load`
+  (VRAM in use, %). A reading the GPU does not support is logged once and left out.
 
 ## Sensors
 

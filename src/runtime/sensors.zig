@@ -33,6 +33,13 @@ pub const standard_sources = [_]struct { name: []const u8, source: []const u8 }{
     .{ .name = "cpu.load", .source = "windows_metrics" },
     .{ .name = "cpu.freq", .source = "windows_metrics" },
     .{ .name = "mem.load", .source = "windows_metrics" },
+    .{ .name = "gpu.temp", .source = "nvidia_gpu" },
+    .{ .name = "gpu.load", .source = "nvidia_gpu" },
+    .{ .name = "gpu.power", .source = "nvidia_gpu" },
+    .{ .name = "gpu.fan", .source = "nvidia_gpu" },
+    .{ .name = "gpu.freq", .source = "nvidia_gpu" },
+    .{ .name = "gpu.mem.freq", .source = "nvidia_gpu" },
+    .{ .name = "gpu.mem.load", .source = "nvidia_gpu" },
 };
 
 fn isValidName(name: []const u8) bool {
@@ -58,7 +65,7 @@ fn standardSource(name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, entry.name, name)) return entry.source;
     }
     if (isCcdTemperature(name)) return "amd_cpu";
-    if (std.mem.startsWith(u8, name, "cpu.") or std.mem.startsWith(u8, name, "mem.")) return "";
+    if (std.mem.startsWith(u8, name, "cpu.") or std.mem.startsWith(u8, name, "mem.") or std.mem.startsWith(u8, name, "gpu.")) return "";
     return null;
 }
 
@@ -133,6 +140,10 @@ test "standard names are reserved for their documented sources and others need t
     try testing.expect(!mayPublish("keychron", "keychronx.battery"));
     try testing.expect(!mayPublish("keychron", "gpu.temp"));
     try testing.expect(!mayPublish("keychron", "cpu.fan"));
+    try testing.expect(mayPublish("nvidia_gpu", "gpu.temp"));
+    try testing.expect(mayPublish("nvidia_gpu", "gpu.mem.load"));
+    try testing.expect(!mayPublish("nvidia_gpu", "gpu.hotspot"));
+    try testing.expect(!mayPublish("gigabyte_gpu", "gpu.fan"));
 }
 
 test "the table stores, updates and ages readings and reports another publisher replacing a value" {

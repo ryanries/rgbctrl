@@ -73,7 +73,8 @@ A NULL function means the capability is absent. Status codes: `RGBCTRL_OK` (0),
   an effect other than off. `led_x` gives LED positions 0..65535 for spatial effects; NULL
   means evenly spaced. `max_fps` 0 means no device limit.
 - `close(RGBCTRL_CLOSE_KEEP)` leaves the outputs as they are; `close(RGBCTRL_CLOSE_EXIT)` is used
-  only when a resident `run` ends (a display may blank itself).
+  only when a resident `run` ends (a display may blank itself). An output that is only right
+  while the plugin feeds it, such as the GPU LCD readout of `gigabyte_gpu`, is removed on both.
 - Persist: plugins never save on their own. The host decides when (see
   `docs\configuration.md`); the plugin returns `E_BUSY` when saving is unsafe right now and an
   error when the sequence did not complete.
@@ -90,7 +91,9 @@ name), `now_ms` (milliseconds on the host clock shared by all plugins), `sensor_
 `rgbctrl.exe`.
 
 Sensor names use `a-z`, `0-9`, `.` and `_` (up to 31 bytes). `cpu.temp`, `cpu.ccd<N>.temp` and
-`cpu.power` belong to `amd_cpu`, `cpu.load`, `cpu.freq` and `mem.load` to `windows_metrics`;
+`cpu.power` belong to `amd_cpu`, `cpu.load`, `cpu.freq` and `mem.load` to `windows_metrics`,
+and `gpu.temp`, `gpu.load`, `gpu.power`, `gpu.fan`, `gpu.freq`, `gpu.mem.freq` and
+`gpu.mem.load` to `nvidia_gpu`; the other `cpu.`, `mem.` and `gpu.` names are reserved, and
 every other plugin publishes under `<plugin name>.`.
 
 ## Writing a plugin in Zig
