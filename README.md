@@ -207,6 +207,10 @@ are checked against pinned SHA-256 hashes before they are loaded.
 - The motherboard's `io_cover` and `chipset` zones are single-color in rgbctrl, although they
   are addressable LED strips (`docs\devices.md`), so a host effect such as `rainbow` shows one
   color across the whole zone.
+- On the X870E AORUS PRO ICE the I/O cover once stopped following color changes and stayed on
+  the first new color, while `persist` was saving to flash within 30 ms of each change; a
+  reboot cleared it. rgbctrl now saves only after a device's effects have been unchanged for
+  60 s. If a zone still stops responding, reboot the PC.
 - `rgbctrl.exe` is about 160 KiB (163,328 bytes), above the 96 KiB target of the design; the
   plugins are 8 to 24 KiB, with `keychron.dll` exactly at the 24 KiB limit that CI enforces.
 
