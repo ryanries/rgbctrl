@@ -146,18 +146,33 @@ line before launching a game. `apply` never writes device memory. `docs\configur
 ## GPU readings on the RTX 5080 LCD
 
 The LCD of the AORUS RTX 5080 MASTER ICE can overlay live GPU readings on its built-in
-screens and rotate through them. rgbctrl switches that overlay on and feeds it the values that
+screens and rotate through them. rgbctrl can switch that overlay on and feed it the values that
 `nvidia_gpu` reads from the NVIDIA driver once a second, sending them again when they change
 visibly and at least every 30 s. It never uploads images and never saves anything into the
 panel.
 
-The feature is opt-in: it talks to the LCD controller on the card's I2C bus with a protocol
-that open-source projects reverse-engineered from Gigabyte Control Center. Turn it on in the
+The feature talks to the LCD controller on the card's I2C bus with a protocol that open-source
+projects reverse-engineered from Gigabyte Control Center, so it takes two steps, both in the
 admin-only base config `%ProgramData%\rgbctrl\rgbctrl.json`:
 
-```json
-{ "plugins": { "gigabyte_gpu": { "lcd": true } } }
-```
+1. `lcd` lets rgbctrl ask the panel which firmware it runs and which screen it shows. These
+   queries change nothing; the log says whether the panel answered.
+
+   ```json
+   { "plugins": { "gigabyte_gpu": { "lcd": true } } }
+   ```
+
+2. `lcd_readout` also lets it send the commands that change what the panel shows: panel on,
+   the built-in screen, the overlay and its values. Only add it once step 1 finds the panel.
+
+   ```json
+   { "plugins": { "gigabyte_gpu": { "lcd": true, "lcd_readout": true } } }
+   ```
+
+   None of these commands writes the panel's flash, but they are not risk-free: the RTX 5090
+   panel of CodeTorch's AorusLcd went dark twice after overlay commands, and came back after a
+   full power-off (switching the power supply off) and, once, after an image upload, which
+   Gigabyte's own software can also do.
 
 The readouts, the seconds each one stays up and the built-in screen can go in either file:
 
@@ -168,12 +183,12 @@ The readouts, the seconds each one stays up and the built-in screen can go in ei
 - `lcd_metrics` accepts `temp`, `clock`, `load`, `fan`, `vram_clock`, `vram` and `power`.
   The panel also has an FPS field, which rgbctrl cannot fill.
 - The panel shows only what rgbctrl sends. When rgbctrl stops feeding it (`rgbctrl stop`, or a
-  config change that turns `lcd` off or reloads the plugin), the overlay goes and the panel
-  returns to the screen it showed before, switching off again if it was off; when the process
-  is killed, the last values stay on the panel.
+  config change that turns `lcd` or `lcd_readout` off or reloads the plugin), the overlay goes
+  and the panel returns to the screen it showed before, switching off again if it was off;
+  when the process is killed, the last values stay on the panel.
 - Each update holds the card's I2C bus for a few milliseconds. rgbctrl skips updates while the
   shown values barely change, but a game can still hitch briefly when one is sent, as some
-  users report with Gigabyte's own software. Remove `lcd` if that bothers you.
+  users report with Gigabyte's own software. Remove `lcd_readout` if that bothers you.
 - With `lcd` on, all of the card's I2C traffic, lighting included, runs at 400 kHz, as
   Gigabyte's software does, and rgbctrl detects the card's lighting controller without reading
   from it.
@@ -230,8 +245,9 @@ It never reads configuration from its own folder. The user config file is treate
 untrusted when elevated: it is opened without following links or junctions anywhere in its
 path, a `plugins` section with more than 256 entries is ignored, and it can only make the
 privileged keys more restrictive; those keys (`enabled`, `persist`, `extra_ids`,
-`sudokoo_sk700v.exclusive` and `gigabyte_gpu.lcd`) take effect from the admin-only base file
-only. PawnIO modules are checked against pinned SHA-256 hashes before they are loaded.
+`sudokoo_sk700v.exclusive`, `gigabyte_gpu.lcd` and `gigabyte_gpu.lcd_readout`) take effect
+from the admin-only base file only. PawnIO modules are checked against pinned SHA-256 hashes
+before they are loaded.
 
 ## Documentation
 
@@ -247,6 +263,9 @@ only. PawnIO modules are checked against pinned SHA-256 hashes before they are l
   that card by an open-source driver, which draws the overlay on an uploaded image; that the
   overlay also works on the built-in screens is documented only for the RTX 5090 MASTER.
   `lcd_screen` picks one of the three built-in screens.
+- On the one RTX 5080 AORUS MASTER ICE tried with rgbctrl so far, the panel refused every query
+  at 0x61 through the Windows driver (NVAPI status -1), also after a full power-off, while the
+  lighting controller on the same bus worked. The cause is not known yet.
 - The SK700V display has no field for fan speed; it shows temperature, power, load and
   frequency.
 - The motherboard's `io_cover` and `chipset` zones are single-color in rgbctrl, although they

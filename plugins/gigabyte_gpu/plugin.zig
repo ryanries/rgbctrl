@@ -116,6 +116,8 @@ const LcdProblem = union(enum) {
 
 const LcdPanel = struct {
     enabled: bool = false,
+    // Without it the panel only gets read-only queries: nothing that changes what it shows.
+    readout: bool = false,
     flags: u8 = lcd.default_metrics,
     seconds: u8 = lcd.default_seconds,
     screen: lcd.Mode = .faith1,
@@ -263,6 +265,13 @@ const Instance = struct {
             return;
         };
         if (!self.lcd.enabled) return;
+        if (self.host.member(config, "lcd_readout")) |node| {
+            if (self.host.asBool(node)) |readout| {
+                self.lcd.readout = readout;
+            } else {
+                self.host.logMessage(.warn, "lcd_readout must be true or false; the GPU LCD only gets read-only queries");
+            }
+        }
         self.lcd.seconds = self.configRange(config, "lcd_seconds", lcd.default_seconds, 1, 60, "lcd_seconds must be a number from 1 to 60; using 4");
         self.lcd.screen = @enumFromInt(self.configRange(config, "lcd_screen", 1, 1, 3, "lcd_screen must be 1, 2 or 3; using 1") - 1);
         const node = self.host.member(config, "lcd_metrics") orelse return;
@@ -337,7 +346,11 @@ const Instance = struct {
             const version = [_]u8{ 'F', digits[firmware >> 4], '.', digits[firmware & 0xF] };
             var names: [64]u8 = undefined;
             var number: [20]u8 = undefined;
-            logParts(self.host, .info, &.{ "GPU LCD firmware ", &version, " found; in run it shows ", lcd.describe(&names, self.lcd.flags), " for ", decimal(&number, self.lcd.seconds), " s each" });
+            if (self.lcd.readout) {
+                logParts(self.host, .info, &.{ "GPU LCD firmware ", &version, " found; in run it shows ", lcd.describe(&names, self.lcd.flags), " for ", decimal(&number, self.lcd.seconds), " s each" });
+            } else {
+                logParts(self.host, .info, &.{ "GPU LCD firmware ", &version, " found; lcd_readout is off, so rgbctrl sends the panel nothing but read-only queries" });
+            }
             return .found;
         }
         if (!saw_card) {
@@ -355,12 +368,14 @@ const Instance = struct {
         self.lcd.problem = problem;
         var number: [20]u8 = undefined;
         var bytes: [lcd.reply_length * 3]u8 = undefined;
+        // Only the readout probes again later; without it the probe at start is the only one.
+        const next = if (self.lcd.readout) "; retrying every 30 s" else "; not asked again until rgbctrl restarts";
         switch (problem) {
             .no_card => self.host.logMessage(.warn, "lcd is on, but no GPU with a supported LCD (RTX 5080 AORUS MASTER ICE) was found"),
-            .busy => self.host.logMessage(.warn, "the rgbctrl I2C lock stayed taken, so the GPU LCD was not queried; retrying every 30 s"),
-            .refused => |status| logParts(self.host, .warn, &.{ "sending the firmware query to the GPU LCD failed (NVAPI status ", decimal(&number, status), "); retrying every 30 s" }),
-            .no_reply => |status| logParts(self.host, .warn, &.{ "the GPU LCD took the firmware query but sent no reply (NVAPI status ", decimal(&number, status), "); retrying every 30 s" }),
-            .unrecognized => |reply| logParts(self.host, .warn, &.{ "the GPU LCD firmware reply ", sdk.text.hexBytes(&bytes, &reply), " is not recognized; the LCD stays untouched, retrying every 30 s" }),
+            .busy => logParts(self.host, .warn, &.{ "the rgbctrl I2C lock stayed taken, so the GPU LCD was not queried", next }),
+            .refused => |status| logParts(self.host, .warn, &.{ "sending the firmware query to the GPU LCD failed (NVAPI status ", decimal(&number, status), ")", next }),
+            .no_reply => |status| logParts(self.host, .warn, &.{ "the GPU LCD took the firmware query but sent no reply (NVAPI status ", decimal(&number, status), ")", next }),
+            .unrecognized => |reply| logParts(self.host, .warn, &.{ "the GPU LCD firmware reply ", sdk.text.hexBytes(&bytes, &reply), " is not recognized, so the LCD stays untouched", next }),
         }
     }
 
@@ -418,6 +433,9 @@ const Instance = struct {
 
     fn tickLcd(self: *Instance, now_ms: u64) void {
         if (!self.lcd.enabled or self.nvapi == null or self.host.mode() != abi.mode_run) return;
+        // Without lcd_readout the probe in open() is all the panel gets: no setup, no values
+        // and no periodic re-probes.
+        if (!self.lcd.readout) return;
         // After sleep every reading is as old as the sleep, which restarts the grace instead of
         // reporting the sensors missing.
         if (now_ms -| self.lcd.last_tick_ms > lcd.hold_ms) {

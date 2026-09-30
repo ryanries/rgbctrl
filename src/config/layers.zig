@@ -16,13 +16,20 @@ const Merged = struct {
 const exclusive_plugin = "sudokoo_sk700v";
 const lcd_plugin = "gigabyte_gpu";
 const common_privileged_keys = [_][]const u8{ "enabled", "persist", "extra_ids" };
+// `lcd` lets gigabyte_gpu query the GPU LCD; `lcd_readout` also lets it send the commands that
+// change what the panel shows.
+const lcd_privileged_keys = [_][]const u8{ "lcd", "lcd_readout" };
 
 fn isPrivileged(plugin: []const u8, key: []const u8) bool {
     for (common_privileged_keys) |privileged| {
         if (std.mem.eql(u8, key, privileged)) return true;
     }
     if (std.mem.eql(u8, plugin, exclusive_plugin) and std.mem.eql(u8, key, "exclusive")) return true;
-    return std.mem.eql(u8, plugin, lcd_plugin) and std.mem.eql(u8, key, "lcd");
+    if (!std.mem.eql(u8, plugin, lcd_plugin)) return false;
+    for (lcd_privileged_keys) |privileged| {
+        if (std.mem.eql(u8, key, privileged)) return true;
+    }
+    return false;
 }
 
 fn merge(arena: std.mem.Allocator, lower: ?*const json.Node, upper: ?*const json.Node) error{OutOfMemory}!?*const json.Node {
@@ -202,7 +209,7 @@ fn warnRemoval(diagnostics: *Diagnostics, node: *const json.Node, layer: []const
 
 fn applicableKeys(plugin: []const u8) []const []const u8 {
     const with_exclusive = comptime common_privileged_keys ++ [_][]const u8{"exclusive"};
-    const with_lcd = comptime common_privileged_keys ++ [_][]const u8{"lcd"};
+    const with_lcd = comptime common_privileged_keys ++ lcd_privileged_keys;
     if (std.mem.eql(u8, plugin, exclusive_plugin)) return &with_exclusive;
     if (std.mem.eql(u8, plugin, lcd_plugin)) return &with_lcd;
     return &common_privileged_keys;
@@ -325,6 +332,27 @@ test "while elevated only the trusted base can turn on the GPU LCD and the user 
     try testing.expect(privilegedValue(kept.root, "gigabyte_gpu", "lcd").?.boolean().?);
     const tightened = try mergeLayers(arena, .{ .label = "base", .root = trusted_base, .trusted = true }, .{ .label = "user", .root = disable, .trusted = false }, true, &diagnostics);
     try testing.expect(!privilegedValue(tightened.root, "gigabyte_gpu", "lcd").?.boolean().?);
+}
+
+test "while elevated only the trusted base can turn on the GPU LCD readout and the user layer can turn it off" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var diagnostics = Diagnostics.init(arena);
+    const probe_only_base = try parseTestDocument(arena, "{\"plugins\": {\"gigabyte_gpu\": {\"lcd\": true}}}");
+    const enable = try parseTestDocument(arena, "{\"plugins\": {\"gigabyte_gpu\": {\"lcd_readout\": true}}}");
+    const refused = try mergeLayers(arena, .{ .label = "base", .root = probe_only_base, .trusted = true }, .{ .label = "user", .root = enable, .trusted = false }, true, &diagnostics);
+    try testing.expect(privilegedValue(refused.root, "gigabyte_gpu", "lcd_readout") == null);
+    try testing.expect(privilegedValue(refused.root, "gigabyte_gpu", "lcd").?.boolean().?);
+    try testing.expect(diagnostics.contains("plugins.gigabyte_gpu.lcd_readout in the user config was ignored"));
+
+    const readout_base = try parseTestDocument(arena, "{\"plugins\": {\"gigabyte_gpu\": {\"lcd\": true, \"lcd_readout\": true}}}");
+    const disable = try parseTestDocument(arena, "{\"plugins\": {\"gigabyte_gpu\": {\"lcd_readout\": false}}}");
+    const kept = try mergeLayers(arena, .{ .label = "base", .root = readout_base, .trusted = true }, .{ .label = "user", .root = null, .trusted = false }, true, &diagnostics);
+    try testing.expect(privilegedValue(kept.root, "gigabyte_gpu", "lcd_readout").?.boolean().?);
+    const tightened = try mergeLayers(arena, .{ .label = "base", .root = readout_base, .trusted = true }, .{ .label = "user", .root = disable, .trusted = false }, true, &diagnostics);
+    try testing.expect(!privilegedValue(tightened.root, "gigabyte_gpu", "lcd_readout").?.boolean().?);
+    try testing.expect(privilegedValue(tightened.root, "gigabyte_gpu", "lcd").?.boolean().?);
 }
 
 test "decide treats null and wrong types from an untrusted layer as ignored attempts" {
