@@ -170,7 +170,8 @@ The readouts, the seconds each one stays up and the built-in screen can go in ei
   shown values barely change, but a game can still hitch briefly when one is sent, as some
   users report with Gigabyte's own software. Remove `lcd` if that bothers you.
 - With `lcd` on, all of the card's I2C traffic, lighting included, runs at 400 kHz, as
-  Gigabyte's software does.
+  Gigabyte's software does, and rgbctrl detects the card's lighting controller without reading
+  from it.
 
 ## Commands
 

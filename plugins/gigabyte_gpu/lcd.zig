@@ -4,6 +4,8 @@ const text = @import("sdk").text;
 // Legacy Gigabyte LCD protocol at 7-bit address 0x61, as documented by the open-source drivers
 // for the RTX 5080 AORUS MASTER ICE (firmware F1.4) and the RTX 5090 MASTER.
 pub const address: u7 = 0x61;
+/// Gigabyte's newer LCD controller ("LcdEx" in its software), which rgbctrl does not drive.
+pub const ex_address: u7 = 0x76;
 pub const frame_length = 256;
 pub const reply_length = 4;
 const magic = [4]u8{ 0xCB, 0x55, 0xAC, 0x38 };
@@ -78,6 +80,13 @@ pub fn buildReadFirmware(frame: *[frame_length]u8) void {
 
 pub fn buildReadMode(frame: *[frame_length]u8) void {
     begin(frame, opcode_read_mode);
+}
+
+/// The version query Gigabyte's software sends to `ex_address` before it falls back to `address`.
+pub fn buildExReadFirmware(frame: *[frame_length]u8) void {
+    @memset(frame, 0);
+    frame[0] = 0x10;
+    frame[1] = 0x01;
 }
 
 pub fn buildOpen(frame: *[frame_length]u8, on: bool) void {
@@ -236,6 +245,9 @@ test "commands are 256-byte frames with the opcode, the magic and zero padding" 
     buildOpen(&frame, false);
     try std.testing.expectEqualSlices(u8, &.{ 0xE7, 0xCB, 0x55, 0xAC, 0x38, 0x02 }, frame[0..6]);
     try expectZeroTail(frame, 6);
+    buildExReadFirmware(&frame);
+    try std.testing.expectEqualSlices(u8, &.{ 0x10, 0x01 }, frame[0..2]);
+    try expectZeroTail(frame, 2);
 }
 
 test "set mode sends mode plus one and ten for the carousel" {

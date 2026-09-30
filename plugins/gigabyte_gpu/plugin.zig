@@ -126,6 +126,7 @@ const LcdPanel = struct {
     setup_pending: bool = true,
     active: bool = false,
     problem: ?LcdProblem = null,
+    ex_probed: bool = false,
     retry_at_ms: u64 = 0,
     failures: u32 = 0,
     last_sent: ?lcd.Encoded = null,
@@ -213,8 +214,14 @@ const Instance = struct {
                 return model;
             },
             .blackwell => {
-                var response: [4]u8 = undefined;
                 const request10 = protocol.buildBlackwellProbe10();
+                // CodeTorch's AorusLcd never reads from this controller on the LCD card: reads from
+                // it hung the I2C engine the LCD shares on the 5090. With lcd on, a write ACK
+                // stands in for the replies, and the PCI identity already fixed the model.
+                if (self.lcd.enabled and lcd.supports(candidate.identity.device_id, candidate.identity.subvendor_id, candidate.identity.subdevice_id)) {
+                    return if (api.writeRetrying(candidate.handle, protocol.blackwell_address, &request10)) model else null;
+                }
+                var response: [4]u8 = undefined;
                 if (!api.writeThenRead(candidate.handle, protocol.blackwell_address, &request10, &response)) return null;
                 if (!protocol.parseBlackwellProbe10(&response)) return null;
                 const request11 = protocol.buildBlackwellSubsystemProbe();
@@ -295,32 +302,27 @@ const Instance = struct {
             var frame: [lcd.frame_length]u8 = undefined;
             var reply: [lcd.reply_length]u8 = undefined;
             lcd.buildReadFirmware(&frame);
-            const started_ms = sdk.win32.GetTickCount64();
-            const query = queryLcd(api, handle, &frame, &reply);
-            const reply_read = switch (query.result) {
-                .answered => |read| read,
+            switch (queryLcd(api, handle, &frame, &reply)) {
+                .answered => {},
                 .refused => |status| {
                     self.noteLcdProblem(.{ .refused = status });
+                    self.probeLcdEx(api, handle);
                     continue;
                 },
                 .no_reply => |status| {
                     self.noteLcdProblem(.{ .no_reply = status });
+                    self.probeLcdEx(api, handle);
                     continue;
                 },
                 .busy => {
                     self.noteLcdProblem(.busy);
                     continue;
                 },
-            };
+            }
             const firmware = lcd.parseFirmware(&reply) orelse {
                 self.noteLcdProblem(.{ .unrecognized = reply });
                 continue;
             };
-            var try_text: [20]u8 = undefined;
-            var read_text: [20]u8 = undefined;
-            var elapsed_text: [20]u8 = undefined;
-            const elapsed_ms = sdk.win32.GetTickCount64() -| started_ms;
-            logParts(self.host, .debug, &.{ "the GPU LCD answered the firmware query on try ", decimal(&try_text, query.tries), ", read ", decimal(&read_text, reply_read), ", about ", decimal(&elapsed_text, @intCast(@min(elapsed_ms, std.math.maxInt(u32)))), " ms after the first send" });
             // Once rgbctrl switched screens, DE reports its own screen, not the one to restore.
             if (!self.lcd.active) {
                 self.lcd.original = readPanelState(api, handle);
@@ -360,6 +362,22 @@ const Instance = struct {
             .no_reply => |status| logParts(self.host, .warn, &.{ "the GPU LCD took the firmware query but sent no reply (NVAPI status ", decimal(&number, status), "); retrying every 30 s" }),
             .unrecognized => |reply| logParts(self.host, .warn, &.{ "the GPU LCD firmware reply ", sdk.text.hexBytes(&bytes, &reply), " is not recognized; the LCD stays untouched, retrying every 30 s" }),
         }
+    }
+
+    /// Diagnostic, once per open: when 0x61 stays silent, asks whether the card has Gigabyte's
+    /// newer LCD controller instead. Gigabyte's software sends this query first on every card.
+    fn probeLcdEx(self: *Instance, api: *sdk.nvapi.Nvapi, handle: sdk.nvapi.GpuHandle) void {
+        if (self.lcd.ex_probed) return;
+        self.lcd.ex_probed = true;
+        var frame: [lcd.frame_length]u8 = undefined;
+        var reply: [lcd.reply_length]u8 = undefined;
+        lcd.buildExReadFirmware(&frame);
+        if (api.exchange(handle, lcd.ex_address, &frame, &reply) != .answered) {
+            self.host.logMessage(.info, "nothing answered at I2C address 0x76 either, where some cards have Gigabyte's newer LCD controller");
+            return;
+        }
+        var bytes: [lcd.reply_length * 3]u8 = undefined;
+        logParts(self.host, .warn, &.{ "a controller at I2C address 0x76 answered with ", sdk.text.hexBytes(&bytes, &reply), ": this card's LCD may be Gigabyte's newer kind, which rgbctrl does not drive" });
     }
 
     fn writeLcd(self: *Instance, handle: sdk.nvapi.GpuHandle, frame: *const [lcd.frame_length]u8) bool {
@@ -469,19 +487,14 @@ const Instance = struct {
     }
 };
 
-const LcdQuery = struct {
-    result: sdk.nvapi.Exchange,
-    tries: u32,
-};
-
-fn queryLcd(api: *sdk.nvapi.Nvapi, handle: sdk.nvapi.GpuHandle, frame: *const [lcd.frame_length]u8, reply: *[lcd.reply_length]u8) LcdQuery {
+fn queryLcd(api: *sdk.nvapi.Nvapi, handle: sdk.nvapi.GpuHandle, frame: *const [lcd.frame_length]u8, reply: *[lcd.reply_length]u8) sdk.nvapi.Exchange {
     var result = api.exchange(handle, lcd.address, frame, reply);
     var tries: u32 = 1;
     while (result != .answered and tries < lcd_query_attempts) : (tries += 1) {
         sdk.win32.Sleep(lcd_query_pause_ms);
         result = api.exchange(handle, lcd.address, frame, reply);
     }
-    return .{ .result = result, .tries = tries };
+    return result;
 }
 
 fn readPanelState(api: *sdk.nvapi.Nvapi, handle: sdk.nvapi.GpuHandle) ?lcd.PanelState {
@@ -489,7 +502,7 @@ fn readPanelState(api: *sdk.nvapi.Nvapi, handle: sdk.nvapi.GpuHandle) ?lcd.Panel
     var reply: [lcd.reply_length]u8 = undefined;
     lcd.buildReadMode(&frame);
     for (0..lcd_query_attempts) |_| {
-        if (queryLcd(api, handle, &frame, &reply).result != .answered) return null;
+        if (queryLcd(api, handle, &frame, &reply) != .answered) return null;
         if (lcd.parseState(&reply)) |state| return state;
     }
     return null;
@@ -613,8 +626,10 @@ fn open(host: *const abi.Host, config: ?*const abi.Json, instance_out: *?*anyopa
     // Gigabyte's LCD service runs the card's I2C bus at 400 kHz; RGB writes at another speed
     // on the same bus were reported to wedge it, so every transaction uses 400 kHz then.
     if (self.lcd.enabled) self.nvapi.?.speed = sdk.nvapi.i2c_speed_400khz;
-    _ = self.discover(true);
+    // The LCD is asked first, before any traffic to the lighting controller, as CodeTorch's
+    // AorusLcd does.
     if (self.lcd.enabled and self.findLcd() == .no_card) self.lcd.enabled = false;
+    _ = self.discover(true);
     instance_out.* = self;
     return abi.status_ok;
 }

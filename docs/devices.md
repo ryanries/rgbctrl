@@ -53,8 +53,9 @@ PC, and the log at `debug` level records every probe and response.
 - Hardware effects: off, static, breathing, flash, cycle, rainbow (1 color); `gradient` runs
   on the host. Host frames at most 10 per second.
 - Discovery: Blackwell `10 01` (read 4 bytes: `01 01|02 01 xx`) and `11 01` (the reply echoes
-  the subsystem id); older cards `AB 00 ...` (read 4 bytes starting with `AB`). A recovery
-  after a failed write probes only the card that failed.
+  the subsystem id); older cards `AB 00 ...` (read 4 bytes starting with `AB`). With `lcd` on,
+  the controller of the LCD card is detected by the `10 01` write alone, with no read, as
+  CodeTorch's AorusLcd does. A recovery after a failed write probes only the card that failed.
 - `persist`: `AA` (older) or `13 01` (Blackwell); refused while any zone of the card receives
   host frames, because the card saves all zones at once.
 - LCD readout (privileged key `lcd`, off by default; RTX 5080 AORUS MASTER ICE, PCI
@@ -64,19 +65,21 @@ PC, and the log at `debug` level records every probe and response.
   and `DE` the current screen and whether the panel is on. Each query is a write followed by a
   separate read, as Gigabyte's software does; a failed read is repeated after waits of 5, 20
   and 50 ms, and the whole query is tried up to three times, 250 ms apart (`DE` also up to three
-  times while its reply can't be read). For the firmware query the log tells one that could not
-  be sent from one that got no reply, with the NVAPI status, again whenever that changes, and at
-  debug level on which try and read the reply came. In `run`, once a sensor has a value: `E7 01`
-  (panel on), `E1` with no fields, `E5` (the built-in screen; left out when `DE` never answered,
-  so the screen stays as it is), `E1` (the fields and the seconds per readout), then `E3` with
-  the values once a second. An `E3` is skipped while no shown value moved by 1 C, 2 %, 50 RPM,
-  3 W, 15 MHz or 1 % of VRAM, but is sent at least every 30 s. When the plugin closes after that
-  (exit, or a reopen for a config change), `E1` with no fields, `E5` with the original screen
-  and `E7 02` if the panel was off. Uploads (`F1`, `F2`) and the save command (`AA`) are never
-  sent, so nothing is written to the panel's flash. A write that fails with NVAPI status -1 (a
-  transient error of the GPU I2C engine) is sent up to three times in all, 100 ms apart. A
-  failed write is retried every 30 s, and the LCD is probed again after three failures in a
-  row.
+  times while its reply can't be read). The LCD is asked before any traffic to the lighting
+  controller. For the firmware query the log tells one that could not be sent from one that got
+  no reply, with the NVAPI status, again whenever that changes. When 0x61 stays silent, one
+  version query (`10 01`, 256 bytes) goes to 0x76, where Gigabyte's software first looks for
+  its newer LCD controller, which rgbctrl does not drive; the result is logged. In `run`, once a
+  sensor has a value: `E7 01` (panel on), `E1` with no fields, `E5` (the built-in screen; left
+  out when `DE` never answered, so the screen stays as it is), `E1` (the fields and the seconds
+  per readout), then `E3` with the values once a second. An `E3` is skipped while no shown
+  value moved by 1 C, 2 %, 50 RPM, 3 W, 15 MHz or 1 % of VRAM, but is sent at least every 30 s.
+  When the plugin closes after that (exit, or a reopen for a config change), `E1` with no
+  fields, `E5` with the original screen and `E7 02` if the panel was off. Uploads (`F1`, `F2`)
+  and the save command (`AA`) are never sent, so nothing is written to the panel's flash. A
+  write that fails with NVAPI status -1 (a transient error of the GPU I2C engine) is sent up to
+  three times in all, 100 ms apart. A failed write is retried every 30 s, and the LCD is probed
+  again after three failures in a row.
 - LCD keys: `lcd_metrics` (`["temp", "load", "fan", "power"]`; also `clock`, `vram_clock` and
   `vram`), `lcd_seconds` (4, 1..60) and `lcd_screen` (built-in screen 1..3, 1). The values come
   from the `nvidia_gpu` sensors `gpu.temp`, `gpu.freq`, `gpu.load`, `gpu.fan`, `gpu.mem.freq`,
