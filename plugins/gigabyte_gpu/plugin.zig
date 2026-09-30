@@ -98,8 +98,21 @@ const Candidate = struct {
 
 const lcd_retry_ms: u64 = 30_000;
 const lcd_reprobe_after_failures: u32 = 3;
+// PrivateGER's driver retries a failed LCD transfer 8 times 250 ms apart; a probe here gives it
+// 3 tries (each already reading again after short waits) to keep open() and tick() short.
+const lcd_query_attempts: u32 = 3;
+const lcd_query_pause_ms: u32 = 250;
 
 const LcdSearch = enum { found, no_card, no_answer };
+
+// Why the LCD could not be used; logged when it differs from the last one.
+const LcdProblem = union(enum) {
+    no_card,
+    busy,
+    refused: i32,
+    no_reply: i32,
+    unrecognized: [lcd.reply_length]u8,
+};
 
 const LcdPanel = struct {
     enabled: bool = false,
@@ -112,7 +125,7 @@ const LcdPanel = struct {
     original: ?lcd.PanelState = null,
     setup_pending: bool = true,
     active: bool = false,
-    warned: bool = false,
+    problem: ?LcdProblem = null,
     retry_at_ms: u64 = 0,
     failures: u32 = 0,
     last_sent: ?lcd.Encoded = null,
@@ -282,14 +295,32 @@ const Instance = struct {
             var frame: [lcd.frame_length]u8 = undefined;
             var reply: [lcd.reply_length]u8 = undefined;
             lcd.buildReadFirmware(&frame);
-            if (!api.writeThenRead(handle, lcd.address, &frame, &reply)) {
-                if (!self.lcd.warned) self.host.logMessage(.warn, "the GPU LCD did not answer the firmware query; retrying every 30 s");
-                continue;
-            }
+            const started_ms = sdk.win32.GetTickCount64();
+            const query = queryLcd(api, handle, &frame, &reply);
+            const reply_read = switch (query.result) {
+                .answered => |read| read,
+                .refused => |status| {
+                    self.noteLcdProblem(.{ .refused = status });
+                    continue;
+                },
+                .no_reply => |status| {
+                    self.noteLcdProblem(.{ .no_reply = status });
+                    continue;
+                },
+                .busy => {
+                    self.noteLcdProblem(.busy);
+                    continue;
+                },
+            };
             const firmware = lcd.parseFirmware(&reply) orelse {
-                if (!self.lcd.warned) self.host.logMessage(.warn, "the GPU LCD firmware reply is not recognized; the LCD stays untouched");
+                self.noteLcdProblem(.{ .unrecognized = reply });
                 continue;
             };
+            var try_text: [20]u8 = undefined;
+            var read_text: [20]u8 = undefined;
+            var elapsed_text: [20]u8 = undefined;
+            const elapsed_ms = sdk.win32.GetTickCount64() -| started_ms;
+            logParts(self.host, .debug, &.{ "the GPU LCD answered the firmware query on try ", decimal(&try_text, query.tries), ", read ", decimal(&read_text, reply_read), ", about ", decimal(&elapsed_text, @intCast(@min(elapsed_ms, std.math.maxInt(u32)))), " ms after the first send" });
             // Once rgbctrl switched screens, DE reports its own screen, not the one to restore.
             if (!self.lcd.active) {
                 self.lcd.original = readPanelState(api, handle);
@@ -299,27 +330,45 @@ const Instance = struct {
             self.lcd.found = true;
             self.lcd.setup_pending = true;
             self.lcd.last_sent = null;
-            self.lcd.warned = false;
+            self.lcd.problem = null;
             const digits = "0123456789ABCDEF";
             const version = [_]u8{ 'F', digits[firmware >> 4], '.', digits[firmware & 0xF] };
             var names: [64]u8 = undefined;
-            var seconds: [3]u8 = undefined;
-            logParts(self.host, .info, &.{ "GPU LCD firmware ", &version, " found; in run it shows ", lcd.describe(&names, self.lcd.flags), " for ", decimal(&seconds, self.lcd.seconds), " s each" });
+            var number: [20]u8 = undefined;
+            logParts(self.host, .info, &.{ "GPU LCD firmware ", &version, " found; in run it shows ", lcd.describe(&names, self.lcd.flags), " for ", decimal(&number, self.lcd.seconds), " s each" });
             return .found;
         }
         if (!saw_card) {
-            if (!self.lcd.warned) self.host.logMessage(.warn, "lcd is on, but no GPU with a supported LCD (RTX 5080 AORUS MASTER ICE) was found");
-            self.lcd.warned = true;
+            self.noteLcdProblem(.no_card);
             return .no_card;
         }
-        self.lcd.warned = true;
         return .no_answer;
+    }
+
+    /// Reports a problem once, and again only when the panel starts failing differently.
+    fn noteLcdProblem(self: *Instance, problem: LcdProblem) void {
+        if (self.lcd.problem) |last| {
+            if (std.meta.eql(last, problem)) return;
+        }
+        self.lcd.problem = problem;
+        var number: [20]u8 = undefined;
+        var bytes: [lcd.reply_length * 3]u8 = undefined;
+        switch (problem) {
+            .no_card => self.host.logMessage(.warn, "lcd is on, but no GPU with a supported LCD (RTX 5080 AORUS MASTER ICE) was found"),
+            .busy => self.host.logMessage(.warn, "the rgbctrl I2C lock stayed taken, so the GPU LCD was not queried; retrying every 30 s"),
+            .refused => |status| logParts(self.host, .warn, &.{ "sending the firmware query to the GPU LCD failed (NVAPI status ", decimal(&number, status), "); retrying every 30 s" }),
+            .no_reply => |status| logParts(self.host, .warn, &.{ "the GPU LCD took the firmware query but sent no reply (NVAPI status ", decimal(&number, status), "); retrying every 30 s" }),
+            .unrecognized => |reply| logParts(self.host, .warn, &.{ "the GPU LCD firmware reply ", sdk.text.hexBytes(&bytes, &reply), " is not recognized; the LCD stays untouched, retrying every 30 s" }),
+        }
     }
 
     fn writeLcd(self: *Instance, handle: sdk.nvapi.GpuHandle, frame: *const [lcd.frame_length]u8) bool {
         var api = &self.nvapi.?;
-        if (api.write(handle, lcd.address, frame)) return true;
-        if (self.lcd.failures == 0) self.host.logMessage(.warn, "GPU LCD write failed; retrying in 30 s");
+        if (api.writeRetrying(handle, lcd.address, frame)) return true;
+        if (self.lcd.failures == 0) {
+            var number: [20]u8 = undefined;
+            logParts(self.host, .warn, &.{ "GPU LCD write failed (NVAPI status ", decimal(&number, api.last_status), "); retrying in 30 s" });
+        }
         return false;
     }
 
@@ -407,27 +456,41 @@ const Instance = struct {
         const handle = self.lcd.handle orelse return;
         var frame: [lcd.frame_length]u8 = undefined;
         lcd.buildOverlay(&frame, 0, 0);
-        _ = api.write(handle, lcd.address, &frame);
+        _ = api.writeRetrying(handle, lcd.address, &frame);
         const original = self.lcd.original orelse return;
         if (original.mode != self.lcd.screen) {
             lcd.buildSetMode(&frame, original.mode);
-            _ = api.write(handle, lcd.address, &frame);
+            _ = api.writeRetrying(handle, lcd.address, &frame);
         }
         if (original.on) return;
         sdk.win32.Sleep(300);
         lcd.buildOpen(&frame, false);
-        _ = api.write(handle, lcd.address, &frame);
+        _ = api.writeRetrying(handle, lcd.address, &frame);
     }
 };
+
+const LcdQuery = struct {
+    result: sdk.nvapi.Exchange,
+    tries: u32,
+};
+
+fn queryLcd(api: *sdk.nvapi.Nvapi, handle: sdk.nvapi.GpuHandle, frame: *const [lcd.frame_length]u8, reply: *[lcd.reply_length]u8) LcdQuery {
+    var result = api.exchange(handle, lcd.address, frame, reply);
+    var tries: u32 = 1;
+    while (result != .answered and tries < lcd_query_attempts) : (tries += 1) {
+        sdk.win32.Sleep(lcd_query_pause_ms);
+        result = api.exchange(handle, lcd.address, frame, reply);
+    }
+    return .{ .result = result, .tries = tries };
+}
 
 fn readPanelState(api: *sdk.nvapi.Nvapi, handle: sdk.nvapi.GpuHandle) ?lcd.PanelState {
     var frame: [lcd.frame_length]u8 = undefined;
     var reply: [lcd.reply_length]u8 = undefined;
     lcd.buildReadMode(&frame);
-    for (0..3) |_| {
-        if (api.writeThenRead(handle, lcd.address, &frame, &reply)) {
-            if (lcd.parseState(&reply)) |state| return state;
-        }
+    for (0..lcd_query_attempts) |_| {
+        if (queryLcd(api, handle, &frame, &reply).result != .answered) return null;
+        if (lcd.parseState(&reply)) |state| return state;
     }
     return null;
 }
@@ -496,14 +559,18 @@ fn logParts(host: sdk.HostApi, level: abi.LogLevel, parts: []const []const u8) v
     host.logMessage(level, buffer[0..length]);
 }
 
-fn decimal(buffer: *[3]u8, value: u8) []const u8 {
-    var remaining = value;
+fn decimal(buffer: *[20]u8, value: i64) []const u8 {
+    var remaining: u64 = @abs(value);
     var start: usize = buffer.len;
     while (true) {
         start -= 1;
-        buffer[start] = '0' + remaining % 10;
+        buffer[start] = '0' + @as(u8, @intCast(remaining % 10));
         remaining /= 10;
         if (remaining == 0) break;
+    }
+    if (value < 0) {
+        start -= 1;
+        buffer[start] = '-';
     }
     return buffer[start..];
 }
@@ -720,12 +787,14 @@ test {
     _ = lcd;
 }
 
-test "decimal writes every u8 without leading zeros" {
-    var buffer: [3]u8 = undefined;
+test "decimal writes integers without leading zeros and with a minus sign" {
+    var buffer: [20]u8 = undefined;
     try std.testing.expectEqualStrings("0", decimal(&buffer, 0));
     try std.testing.expectEqualStrings("4", decimal(&buffer, 4));
-    try std.testing.expectEqualStrings("60", decimal(&buffer, 60));
     try std.testing.expectEqualStrings("255", decimal(&buffer, 255));
+    try std.testing.expectEqualStrings("-1", decimal(&buffer, -1));
+    try std.testing.expectEqualStrings("-2147483648", decimal(&buffer, std.math.minInt(i32)));
+    try std.testing.expectEqualStrings("-9223372036854775808", decimal(&buffer, std.math.minInt(i64)));
 }
 
 test "device info pointers refer to the device's own storage after the device moves" {

@@ -157,6 +157,32 @@ pub const Nvapi = struct {
         if (!self.lock()) return false;
         defer self.unlock();
         if (!self.writeLocked(gpu, address7, request)) return false;
+        return self.readLocked(gpu, address7, response);
+    }
+
+    /// Like `writeThenRead`, but tells a request that was refused from one that got no reply,
+    /// and reads again after each of `reply_waits_ms` while the device may still be busy.
+    pub fn exchange(self: *Nvapi, gpu: GpuHandle, address7: u7, request: []const u8, response: []u8) Exchange {
+        if (!self.lock()) return .busy;
+        defer self.unlock();
+        if (!self.writeLocked(gpu, address7, request)) return .{ .refused = self.last_status };
+        const reader = PatientReader{ .api = self, .gpu = gpu, .address7 = address7, .response = response };
+        if (readPatiently(reader, &reply_waits_ms)) |read| return .{ .answered = read };
+        return .{ .no_reply = self.last_status };
+    }
+
+    /// Writes, trying again while NVAPI reports its generic error, which the GPU I2C engine
+    /// returns now and then for a valid transfer.
+    pub fn writeRetrying(self: *Nvapi, gpu: GpuHandle, address7: u7, data: []const u8) bool {
+        var attempt: u32 = 1;
+        while (true) : (attempt += 1) {
+            if (self.write(gpu, address7, data)) return true;
+            if (self.last_status != status_error or attempt == write_attempts) return false;
+            win32.Sleep(write_retry_pause_ms);
+        }
+    }
+
+    fn readLocked(self: *Nvapi, gpu: GpuHandle, address7: u7, response: []u8) bool {
         var info = I2cInfoV3{ .i2c_dev_address = wireAddress(address7), .data = response.ptr, .size = @intCast(response.len), .speed_khz = self.speed };
         var extra = [2]u32{ 0, 0 };
         self.last_status = self.i2c_read(gpu, &info, &extra);
@@ -183,6 +209,89 @@ pub const Nvapi = struct {
         if (self.bus_lock) |handle| _ = win32.ReleaseMutex(handle);
     }
 };
+
+/// The outcome of `Nvapi.exchange`.
+pub const Exchange = union(enum) {
+    /// The reply came with this read: 1 for the read right after the write, then one more for
+    /// each of `reply_waits_ms`.
+    answered: u32,
+    /// The device did not take the request; the NVAPI status of the write.
+    refused: i32,
+    /// The device took the request but every read failed; the NVAPI status of the last read.
+    no_reply: i32,
+    /// The rgbctrl I2C lock stayed taken, so nothing was sent.
+    busy,
+};
+
+// NVAPI_ERROR: the generic status the I2C calls return for a transfer that failed.
+pub const status_error: i32 = -1;
+const write_attempts: u32 = 3;
+const write_retry_pause_ms: u32 = 100;
+// Pauses before each read after the first, for a device still preparing its reply.
+pub const reply_waits_ms = [_]u32{ 5, 20, 50 };
+
+const PatientReader = struct {
+    api: *Nvapi,
+    gpu: GpuHandle,
+    address7: u7,
+    response: []u8,
+
+    fn read(self: PatientReader) bool {
+        return self.api.readLocked(self.gpu, self.address7, self.response);
+    }
+
+    fn sleep(_: PatientReader, milliseconds: u32) void {
+        win32.Sleep(milliseconds);
+    }
+};
+
+/// Reads at once and again after each wait until a read succeeds; returns which read it was.
+fn readPatiently(reader: anytype, waits_ms: []const u32) ?u32 {
+    if (reader.read()) return 1;
+    for (waits_ms, 2..) |wait_ms, read| {
+        reader.sleep(wait_ms);
+        if (reader.read()) return @intCast(read);
+    }
+    return null;
+}
+
+const FakeReader = struct {
+    failures_left: u32,
+    reads: u32 = 0,
+    slept_ms: u32 = 0,
+
+    fn read(self: *FakeReader) bool {
+        self.reads += 1;
+        if (self.failures_left == 0) return true;
+        self.failures_left -= 1;
+        return false;
+    }
+
+    fn sleep(self: *FakeReader, milliseconds: u32) void {
+        self.slept_ms += milliseconds;
+    }
+};
+
+test "a reply that is ready at once comes with the first read" {
+    var reader = FakeReader{ .failures_left = 0 };
+    try std.testing.expectEqual(@as(?u32, 1), readPatiently(&reader, &reply_waits_ms));
+    try std.testing.expectEqual(@as(u32, 1), reader.reads);
+    try std.testing.expectEqual(@as(u32, 0), reader.slept_ms);
+}
+
+test "a slow reply is read after the waits so far" {
+    var reader = FakeReader{ .failures_left = 2 };
+    try std.testing.expectEqual(@as(?u32, 3), readPatiently(&reader, &reply_waits_ms));
+    try std.testing.expectEqual(@as(u32, 3), reader.reads);
+    try std.testing.expectEqual(@as(u32, 25), reader.slept_ms);
+}
+
+test "a missing reply is given up after every wait" {
+    var reader = FakeReader{ .failures_left = 100 };
+    try std.testing.expectEqual(@as(?u32, null), readPatiently(&reader, &reply_waits_ms));
+    try std.testing.expectEqual(@as(u32, 1 + reply_waits_ms.len), reader.reads);
+    try std.testing.expectEqual(@as(u32, 75), reader.slept_ms);
+}
 
 test "wireAddress shifts the 7-bit address into the NVAPI address byte" {
     try std.testing.expectEqual(@as(u8, 0xE2), wireAddress(0x71));
