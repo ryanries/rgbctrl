@@ -44,6 +44,11 @@ plugin sends during discovery, and known conflicts.
 3. `zig build test` runs the unit tests; `pwsh tests\smoke.ps1` runs the end-to-end tests
    against the virtual plugin (it never loads the hardware plugins).
 
+Stability and readable code come before binary size. CI still fails a release build with a
+plugin above 128 KiB or an `rgbctrl.exe` above 512 KiB, but only to catch accidents such as a
+Debug build in the release output (today the plugins are 8 to 25 KiB and `rgbctrl.exe` about
+160 KiB).
+
 To install rgbctrl as a SYSTEM task later (see "Run at startup"), build in a folder that only
 you and administrators can modify, for example under your user profile: folders created
 directly under `C:\` usually let every signed-in user change them, and the installer refuses
@@ -251,8 +256,6 @@ only. PawnIO modules are checked against pinned SHA-256 hashes before they are l
   the first new color, while `persist` was saving to flash within 30 ms of each change; a
   reboot cleared it. rgbctrl now saves only after a device's effects have been unchanged for
   60 s. If a zone still stops responding, reboot the PC.
-- `rgbctrl.exe` is about 160 KiB (163,840 bytes), above the 96 KiB target of the design; the
-  plugins are 8 to 24 KiB, with `keychron.dll` exactly at the 24 KiB limit that CI enforces.
 
 ## License
 
