@@ -120,7 +120,8 @@ cannot cover on its own:
   controller resets and reloads its stored rainbow, and rgbctrl gets no power-state signal to
   re-assert, so the colors stay reverted until the next config reload or restart.
 - A reboot. The controllers power up showing their stored profile until the rgbctrl task starts
-  and applies your config.
+  and applies your config; the motherboard waits until Windows has been running 5 minutes (see
+  "Known limitations").
 
 Enable `persist` for the Gigabyte plugins so rgbctrl saves the applied effect into the
 controller's non-volatile memory; the controller then reloads your colors on a reset instead of
@@ -147,23 +148,32 @@ line before launching a game. `apply` never writes device memory. `docs\configur
 
 The LCD of the AORUS RTX 5080 MASTER ICE can overlay live GPU readings on its built-in
 screens and rotate through them. rgbctrl can switch that overlay on and feed it the values that
-`nvidia_gpu` reads from the NVIDIA driver once a second, sending them again when they change
-visibly and at least every 30 s. It never uploads images and never saves anything into the
-panel.
+`nvidia_gpu` reads from the NVIDIA driver once a second. It never uploads images and never
+saves anything into the panel.
 
-The feature talks to the LCD controller on the card's I2C bus with a protocol that open-source
-projects reverse-engineered from Gigabyte Control Center, so it takes two steps, both in the
-admin-only base config `%ProgramData%\rgbctrl\rgbctrl.json`:
+The card ships with one of two LCD controllers, and its PCI identity does not tell which:
 
-1. `lcd` lets rgbctrl ask the panel which firmware it runs and which screen it shows. These
-   queries change nothing; the log says whether the panel answered.
+- the older one at I2C address 0x61, whose protocol open-source projects reverse-engineered
+  from Gigabyte Control Center (firmware F1.4 on the card they tested);
+- Gigabyte's newer one ("LcdEx" in its software) at 0x76, found on the card rgbctrl was tested
+  with (firmware 1.5). rgbctrl sends it the commands of Gigabyte Control Center 26.09 and its
+  `AorusLcdService`, recovered from their decompiled code; no open-source driver had tried
+  them on a card before.
+
+rgbctrl asks for the newer controller first, as Gigabyte's software does. Using the panel takes
+two steps, both in the admin-only base config `%ProgramData%\rgbctrl\rgbctrl.json`:
+
+1. `lcd` lets rgbctrl ask which controller the card has and which firmware it runs (and, on
+   the older one, which screen it shows). These queries change nothing; the log says what
+   answered (`GPU LCD found: ...`).
 
    ```json
    { "plugins": { "gigabyte_gpu": { "lcd": true } } }
    ```
 
-2. `lcd_readout` also lets it send the commands that change what the panel shows: panel on,
-   the built-in screen, the overlay and its values. Only add it once step 1 finds the panel.
+2. `lcd_readout` also lets it send the commands that change what the panel shows: the overlay
+   and its values, and the panel's power and built-in screen (on the newer controller only
+   with `lcd_screen`, see below). Only add it once step 1 finds the panel.
 
    ```json
    { "plugins": { "gigabyte_gpu": { "lcd": true, "lcd_readout": true } } }
@@ -174,24 +184,48 @@ admin-only base config `%ProgramData%\rgbctrl\rgbctrl.json`:
    full power-off (switching the power supply off) and, once, after an image upload, which
    Gigabyte's own software can also do.
 
-The readouts, the seconds each one stays up and the built-in screen can go in either file:
+The readouts, the seconds each one stays up, the built-in screen and, on the newer controller,
+the color of the readings can go in either file:
 
 ```json
-{ "plugins": { "gigabyte_gpu": { "lcd_metrics": ["temp", "load", "fan", "power"], "lcd_seconds": 4, "lcd_screen": 1 } } }
+{
+  "plugins": {
+    "gigabyte_gpu": {
+      "lcd_metrics": ["temp", "load", "fan", "power"],
+      "lcd_seconds": 4,
+      "lcd_color": "#FFFFFF"
+    }
+  }
+}
 ```
 
 - `lcd_metrics` accepts `temp`, `clock`, `load`, `fan`, `vram_clock`, `vram` and `power`.
   The panel also has an FPS field, which rgbctrl cannot fill.
+- `lcd_screen` (1, 2 or 3; anything else is ignored with a warning) picks one of the three
+  built-in screens ("Enthusiast 01" to "03" in Gigabyte's software). The older controller
+  switches to it (screen 1 without the key). The newer one cannot report its screen, so rgbctrl
+  could not switch it back: without `lcd_screen` it puts the overlay on the screen the panel
+  shows (over the Chibi Time mascot on the tested card), and only with `lcd_screen` does it
+  switch the panel on and change the screen.
+- `lcd_seconds` is 1 to 60, but the newer controller shows a reading at most 10 s. `lcd_color`
+  (`"#RRGGBB"`, white by default) is ignored by the older controller.
 - The panel shows only what rgbctrl sends. When rgbctrl stops feeding it (`rgbctrl stop`, or a
-  config change that turns `lcd` or `lcd_readout` off or reloads the plugin), the overlay goes
-  and the panel returns to the screen it showed before, switching off again if it was off;
-  when the process is killed, the last values stay on the panel.
-- Each update holds the card's I2C bus for a few milliseconds. rgbctrl skips updates while the
-  shown values barely change, but a game can still hitch briefly when one is sent, as some
-  users report with Gigabyte's own software. Remove `lcd_readout` if that bothers you.
-- With `lcd` on, all of the card's I2C traffic, lighting included, runs at 400 kHz, as
-  Gigabyte's software does, and rgbctrl detects the card's lighting controller without reading
-  from it.
+  config change that turns `lcd` or `lcd_readout` off or reloads the plugin), the overlay goes.
+  The older controller then returns to the screen it showed before, switching off again if it
+  was off. A screen that `lcd_screen` set on the newer one stays until the card loses power;
+  Gigabyte's software treats such a change as unsaved, so the panel should then show the
+  screen saved in it again. When the process is killed, the last values stay on the panel.
+- Each update holds the card's I2C bus for a few milliseconds, about 25 ms on the newer
+  controller. The older controller gets an update when the shown values change visibly and at
+  least every 30 s. The newer one gets one every second, as Gigabyte's service sends them,
+  because how long it keeps values without an update is not known. A game can hitch briefly
+  when an update is sent, as some users report with Gigabyte's own software. Remove
+  `lcd_readout` if that bothers you.
+- With `lcd` on, rgbctrl detects the LCD card's lighting controller without reading from it.
+  Once a panel answers, all I2C traffic to its card, lighting included, runs at the speed
+  Gigabyte's software uses for that panel: 100 kHz for the newer controller, 400 kHz for the
+  older. Until then the card's lighting runs at 100 kHz, and each probe asks 0x76 at 100 kHz
+  and 0x61 at 400 kHz.
 
 ## Commands
 
@@ -259,13 +293,11 @@ before they are loaded.
 
 - Images, text and GIFs on the RTX 5080 LCD, Super I/O fan control, the Keychron wireless
   modes (2.4 GHz dongle and Bluetooth) and DDR5 hardware effects are not implemented.
-- The GPU LCD readout supports only the RTX 5080 AORUS MASTER ICE. Its protocol was confirmed on
-  that card by an open-source driver, which draws the overlay on an uploaded image; that the
-  overlay also works on the built-in screens is documented only for the RTX 5090 MASTER.
-  `lcd_screen` picks one of the three built-in screens.
-- On the one RTX 5080 AORUS MASTER ICE tried with rgbctrl so far, the panel refused every query
-  at 0x61 through the Windows driver (NVAPI status -1), also after a full power-off, while the
-  lighting controller on the same bus worked. The cause is not known yet.
+- The GPU LCD readout supports only the RTX 5080 AORUS MASTER ICE. The older controller's
+  protocol was confirmed on that card by an open-source driver, which draws the overlay on an
+  uploaded image; that the overlay also works on the built-in screens is documented only for the
+  RTX 5090 MASTER. The newer controller gets the commands of Gigabyte's software, which no
+  driver outside it had sent before rgbctrl.
 - The SK700V display has no field for fan speed; it shows temperature, power, load and
   frequency.
 - The motherboard's `io_cover` and `chipset` zones are single-color in rgbctrl, although they
@@ -275,6 +307,14 @@ before they are loaded.
   the first new color, while `persist` was saving to flash within 30 ms of each change; a
   reboot cleared it. rgbctrl now saves only after a device's effects have been unchanged for
   60 s. If a zone still stops responding, reboot the PC.
+- After a cold boot, the same board left its I/O cover dark until the next restart when rgbctrl
+  wrote to it in the first seconds after Windows started (every other zone took the writes),
+  and lit it when the same writes came minutes later. So in `run` the motherboard's lighting
+  waits until Windows has been running 300 s since it started or last woke from sleep or
+  hibernation, a power-on with Fast Startup included (`boot_delay_seconds` in
+  `docs\devices.md`); the board shows its own effect until then. `apply` leaves the
+  motherboard alone during that time. Why the controller needs the wait, and how long exactly,
+  is not known.
 
 ## License
 

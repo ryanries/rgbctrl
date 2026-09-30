@@ -105,13 +105,21 @@ const lcd_query_pause_ms: u32 = 250;
 
 const LcdSearch = enum { found, no_card, no_answer };
 
+// What an LCD address did with the firmware query when no panel came of it.
+const QueryMiss = union(enum) {
+    refused: i32,
+    no_reply: i32,
+    no_firmware,
+};
+
 // Why the LCD could not be used; logged when it differs from the last one.
 const LcdProblem = union(enum) {
     no_card,
     busy,
-    refused: i32,
-    no_reply: i32,
+    // What 0x76 and then 0x61 did; null for an address that was not asked.
+    silent: struct { ex: ?QueryMiss, legacy: ?QueryMiss },
     unrecognized: [lcd.reply_length]u8,
+    unrecognized_ex: [lcd.reply_length]u8,
 };
 
 const LcdPanel = struct {
@@ -121,14 +129,19 @@ const LcdPanel = struct {
     flags: u8 = lcd.default_metrics,
     seconds: u8 = lcd.default_seconds,
     screen: lcd.Mode = .faith1,
+    // Whether lcd_screen was given; the newer controller changes screens only then.
+    screen_set: bool = false,
+    color: abi.Rgb = lcd.default_color,
+    kind: lcd.Kind = .legacy,
     // The card of the panel; kept when a later probe fails, so close() can still restore it.
     handle: ?sdk.nvapi.GpuHandle = null,
+    // The I2C speed of every transfer to that card, lighting included.
+    bus_speed: u32 = sdk.nvapi.i2c_speed_default,
     found: bool = false,
     original: ?lcd.PanelState = null,
     setup_pending: bool = true,
     active: bool = false,
     problem: ?LcdProblem = null,
-    ex_probed: bool = false,
     retry_at_ms: u64 = 0,
     failures: u32 = 0,
     last_sent: ?lcd.Encoded = null,
@@ -206,7 +219,8 @@ const Instance = struct {
 
     fn tryProbe(self: *Instance, candidate: Candidate, family: protocol.ProtocolFamily) ?protocol.DeviceModel {
         const model = protocol.lookup(candidate.identity, family) orelse return null;
-        var api = &self.nvapi.?;
+        const lcd_card = lcd.supports(candidate.identity.device_id, candidate.identity.subvendor_id, candidate.identity.subdevice_id);
+        const api = self.busFor(candidate.handle, lcd_card);
         switch (family) {
             .legacy => {
                 var response: [4]u8 = undefined;
@@ -220,7 +234,7 @@ const Instance = struct {
                 // CodeTorch's AorusLcd never reads from this controller on the LCD card: reads from
                 // it hung the I2C engine the LCD shares on the 5090. With lcd on, a write ACK
                 // stands in for the replies, and the PCI identity already fixed the model.
-                if (self.lcd.enabled and lcd.supports(candidate.identity.device_id, candidate.identity.subvendor_id, candidate.identity.subdevice_id)) {
+                if (self.lcd.enabled and lcd_card) {
                     return if (api.writeRetrying(candidate.handle, protocol.blackwell_address, &request10)) model else null;
                 }
                 var response: [4]u8 = undefined;
@@ -235,8 +249,8 @@ const Instance = struct {
     }
 
     fn write(self: *Instance, device: *Device, bytes: []const u8) i32 {
-        var api = &self.nvapi.?;
-        if (!api.write(device.handle, device.address, bytes)) {
+        const lcd_card = lcd.supports(device.identity.device_id, device.identity.subvendor_id, device.identity.subdevice_id);
+        if (!self.busFor(device.handle, lcd_card).write(device.handle, device.address, bytes)) {
             self.host.logMessage(.warn, "GPU RGB I2C write failed");
             device.lost = true;
             return abi.status_device_lost;
@@ -273,7 +287,24 @@ const Instance = struct {
             }
         }
         self.lcd.seconds = self.configRange(config, "lcd_seconds", lcd.default_seconds, 1, 60, "lcd_seconds must be a number from 1 to 60; using 4");
-        self.lcd.screen = @enumFromInt(self.configRange(config, "lcd_screen", 1, 1, 3, "lcd_screen must be 1, 2 or 3; using 1") - 1);
+        if (self.host.member(config, "lcd_screen")) |node| {
+            // Only a valid screen counts as asked for: the newer controller cannot switch back.
+            const screen = if (self.host.asNumber(node)) |value| sdk.text.roundToInt(i64, value) else 0;
+            if (screen >= 1 and screen <= 3) {
+                self.lcd.screen = @enumFromInt(screen - 1);
+                self.lcd.screen_set = true;
+            } else {
+                self.host.logMessage(.warn, "lcd_screen must be 1, 2 or 3; ignored");
+            }
+        }
+        if (self.host.member(config, "lcd_color")) |node| {
+            const parsed = if (self.host.asString(node)) |color_text| sdk.color.parseHex(color_text) else null;
+            if (parsed) |color| {
+                self.lcd.color = color;
+            } else {
+                self.host.logMessage(.warn, "lcd_color must be a color such as \"#FFFFFF\"; using white");
+            }
+        }
         const node = self.host.member(config, "lcd_metrics") orelse return;
         if (self.host.kind(node) != abi.json_array) {
             self.host.logMessage(.warn, "lcd_metrics must be an array of names; using temp, load, fan and power");
@@ -308,19 +339,37 @@ const Instance = struct {
             const pci = api.pciIds(handle) orelse continue;
             if (!lcd.supports(pci.device(), pci.subvendor(), pci.subdevice())) continue;
             saw_card = true;
+            // A card has one LCD controller, so once one was found on it, only that one is
+            // asked again, at its own speed.
+            const adopted_here = if (self.lcd.handle) |card| card == handle else false;
+            const ask_ex = !adopted_here or self.lcd.kind == .ex;
+            const ask_legacy = !adopted_here or self.lcd.kind == .legacy;
+            var ex_miss: ?QueryMiss = null;
+            if (ask_ex) {
+                // Gigabyte's software asks for its newer controller first and falls back to the
+                // older one.
+                switch (self.findExPanel(api, handle)) {
+                    .found => return .found,
+                    .skip => continue,
+                    .fallback => |miss| ex_miss = miss,
+                }
+            }
+            if (!ask_legacy) {
+                self.noteLcdProblem(.{ .silent = .{ .ex = ex_miss, .legacy = null } });
+                continue;
+            }
+            api.speed = sdk.nvapi.i2c_speed_400khz;
             var frame: [lcd.frame_length]u8 = undefined;
             var reply: [lcd.reply_length]u8 = undefined;
             lcd.buildReadFirmware(&frame);
-            switch (queryLcd(api, handle, &frame, &reply)) {
+            switch (queryLcd(api, handle, lcd.address, &frame, &reply)) {
                 .answered => {},
                 .refused => |status| {
-                    self.noteLcdProblem(.{ .refused = status });
-                    self.probeLcdEx(api, handle);
+                    self.noteLcdProblem(.{ .silent = .{ .ex = ex_miss, .legacy = .{ .refused = status } } });
                     continue;
                 },
                 .no_reply => |status| {
-                    self.noteLcdProblem(.{ .no_reply = status });
-                    self.probeLcdEx(api, handle);
+                    self.noteLcdProblem(.{ .silent = .{ .ex = ex_miss, .legacy = .{ .no_reply = status } } });
                     continue;
                 },
                 .busy => {
@@ -337,20 +386,10 @@ const Instance = struct {
                 self.lcd.original = readPanelState(api, handle);
                 if (self.lcd.original == null) self.host.logMessage(.warn, "the GPU LCD did not report its screen; the readout goes on the screen it shows now");
             }
-            self.lcd.handle = handle;
-            self.lcd.found = true;
-            self.lcd.setup_pending = true;
-            self.lcd.last_sent = null;
-            self.lcd.problem = null;
+            self.adoptLcd(handle, .legacy);
             const digits = "0123456789ABCDEF";
             const version = [_]u8{ 'F', digits[firmware >> 4], '.', digits[firmware & 0xF] };
-            var names: [64]u8 = undefined;
-            var number: [20]u8 = undefined;
-            if (self.lcd.readout) {
-                logParts(self.host, .info, &.{ "GPU LCD firmware ", &version, " found; in run it shows ", lcd.describe(&names, self.lcd.flags), " for ", decimal(&number, self.lcd.seconds), " s each" });
-            } else {
-                logParts(self.host, .info, &.{ "GPU LCD firmware ", &version, " found; lcd_readout is off, so rgbctrl sends the panel nothing but read-only queries" });
-            }
+            self.logLcdFound("the older controller, firmware ", &version, "");
             return .found;
         }
         if (!saw_card) {
@@ -360,44 +399,129 @@ const Instance = struct {
         return .no_answer;
     }
 
+    const ExSearch = union(enum) { found, fallback: QueryMiss, skip };
+
+    /// Asks for Gigabyte's newer LCD controller at 0x76, at the 100 kHz its software uses there.
+    fn findExPanel(self: *Instance, api: *sdk.nvapi.Nvapi, handle: sdk.nvapi.GpuHandle) ExSearch {
+        api.speed = sdk.nvapi.i2c_speed_100khz;
+        var frame: [lcd.frame_length]u8 = undefined;
+        var reply: [lcd.reply_length]u8 = undefined;
+        lcd.buildExReadFirmware(&frame);
+        const result = queryLcd(api, handle, lcd.ex_address, &frame, &reply);
+        const firmware = switch (lcd.classifyExProbe(result, &reply)) {
+            .panel => |version| version,
+            .fallback => {
+                self.host.logMessage(.debug, "no newer GPU LCD controller answered the firmware query at 0x76");
+                return .{ .fallback = switch (result) {
+                    .refused => |status| .{ .refused = status },
+                    .no_reply => |status| .{ .no_reply = status },
+                    else => .no_firmware,
+                } };
+            },
+            .unclear => {
+                if (result == .busy) {
+                    self.noteLcdProblem(.busy);
+                } else {
+                    self.noteLcdProblem(.{ .unrecognized_ex = reply });
+                }
+                return .skip;
+            },
+        };
+        // This panel cannot report its screen, so there is no screen to restore.
+        self.lcd.original = null;
+        self.adoptLcd(handle, .ex);
+        var major: [20]u8 = undefined;
+        var minor: [20]u8 = undefined;
+        var version: [41]u8 = undefined;
+        var length = appendText(&version, 0, decimal(&major, firmware.major));
+        length = appendText(&version, length, ".");
+        length = appendText(&version, length, decimal(&minor, firmware.minor));
+        const where = if (self.lcd.screen_set) " on the built-in screen set by lcd_screen" else " over the screen it shows now";
+        self.logLcdFound("Gigabyte's newer controller, firmware ", version[0..length], where);
+        if (self.lcd.readout and self.lcd.seconds > lcd.ex_max_seconds) self.host.logMessage(.warn, "this GPU LCD shows each reading for at most 10 s; lcd_seconds above 10 counts as 10");
+        return .found;
+    }
+
+    fn adoptLcd(self: *Instance, handle: sdk.nvapi.GpuHandle, kind: lcd.Kind) void {
+        self.lcd.kind = kind;
+        self.lcd.handle = handle;
+        self.lcd.bus_speed = switch (kind) {
+            .legacy => sdk.nvapi.i2c_speed_400khz,
+            .ex => sdk.nvapi.i2c_speed_100khz,
+        };
+        self.lcd.found = true;
+        self.lcd.setup_pending = true;
+        self.lcd.last_sent = null;
+        self.lcd.problem = null;
+    }
+
+    /// NVAPI set to the speed for `handle`. Once a panel was found on a card, every transfer to
+    /// that card, lighting included, runs at the speed Gigabyte's software uses for that panel:
+    /// RGB writes at another speed on the same bus were reported to wedge it. With `lcd` on, an
+    /// LCD card whose panel has not answered yet gets 100 kHz, never an unspecified speed; other
+    /// cards keep the driver's.
+    fn busFor(self: *Instance, handle: sdk.nvapi.GpuHandle, lcd_card: bool) *sdk.nvapi.Nvapi {
+        const api = &self.nvapi.?;
+        const panel_card = if (self.lcd.handle) |card| card == handle else false;
+        api.speed = if (panel_card)
+            self.lcd.bus_speed
+        else if (self.lcd.enabled and lcd_card)
+            sdk.nvapi.i2c_speed_100khz
+        else
+            sdk.nvapi.i2c_speed_default;
+        return api;
+    }
+
+    fn overlaySeconds(self: *const Instance) u8 {
+        return if (self.lcd.kind == .ex) @min(self.lcd.seconds, lcd.ex_max_seconds) else self.lcd.seconds;
+    }
+
+    fn lcdAddress(self: *const Instance) u7 {
+        return if (self.lcd.kind == .ex) lcd.ex_address else lcd.address;
+    }
+
+    fn logLcdFound(self: *Instance, controller: []const u8, version: []const u8, where: []const u8) void {
+        var names: [64]u8 = undefined;
+        var number: [20]u8 = undefined;
+        if (self.lcd.readout) {
+            logParts(self.host, .info, &.{ "GPU LCD found: ", controller, version, "; in run it shows ", lcd.describe(&names, self.lcd.flags), " for ", decimal(&number, self.overlaySeconds()), " s each", where });
+        } else {
+            logParts(self.host, .info, &.{ "GPU LCD found: ", controller, version, "; lcd_readout is off, so rgbctrl sends the panel nothing but read-only queries" });
+        }
+    }
+
     /// Reports a problem once, and again only when the panel starts failing differently.
     fn noteLcdProblem(self: *Instance, problem: LcdProblem) void {
         if (self.lcd.problem) |last| {
             if (std.meta.eql(last, problem)) return;
         }
         self.lcd.problem = problem;
-        var number: [20]u8 = undefined;
         var bytes: [lcd.reply_length * 3]u8 = undefined;
+        var ex_text: [48]u8 = undefined;
+        var legacy_text: [48]u8 = undefined;
         // Only the readout probes again later; without it the probe at start is the only one.
         const next = if (self.lcd.readout) "; retrying every 30 s" else "; not asked again until rgbctrl restarts";
         switch (problem) {
             .no_card => self.host.logMessage(.warn, "lcd is on, but no GPU with a supported LCD (RTX 5080 AORUS MASTER ICE) was found"),
             .busy => logParts(self.host, .warn, &.{ "the rgbctrl I2C lock stayed taken, so the GPU LCD was not queried", next }),
-            .refused => |status| logParts(self.host, .warn, &.{ "sending the firmware query to the GPU LCD failed (NVAPI status ", decimal(&number, status), ")", next }),
-            .no_reply => |status| logParts(self.host, .warn, &.{ "the GPU LCD took the firmware query but sent no reply (NVAPI status ", decimal(&number, status), ")", next }),
-            .unrecognized => |reply| logParts(self.host, .warn, &.{ "the GPU LCD firmware reply ", sdk.text.hexBytes(&bytes, &reply), " is not recognized, so the LCD stays untouched", next }),
+            .silent => |silent| {
+                // Only an address that was asked appears; one alone is a panel found earlier.
+                if (silent.ex != null and silent.legacy != null) {
+                    logParts(self.host, .warn, &.{ "no GPU LCD answered the firmware query: 0x76 (", describeMiss(&ex_text, silent.ex.?), "), 0x61 (", describeMiss(&legacy_text, silent.legacy.?), ")", next });
+                } else if (silent.ex) |miss| {
+                    logParts(self.host, .warn, &.{ "the GPU LCD at 0x76 no longer answers the firmware query (", describeMiss(&ex_text, miss), ")", next });
+                } else if (silent.legacy) |miss| {
+                    logParts(self.host, .warn, &.{ "the GPU LCD at 0x61 no longer answers the firmware query (", describeMiss(&legacy_text, miss), ")", next });
+                }
+            },
+            .unrecognized => |reply| logParts(self.host, .warn, &.{ "the GPU LCD firmware reply ", sdk.text.hexBytes(&bytes, &reply), " from 0x61 is not recognized, so the LCD stays untouched", next }),
+            .unrecognized_ex => |reply| logParts(self.host, .warn, &.{ "the GPU LCD firmware reply ", sdk.text.hexBytes(&bytes, &reply), " from 0x76 is not recognized, so the LCD stays untouched", next }),
         }
-    }
-
-    /// Diagnostic, once per open: when 0x61 stays silent, asks whether the card has Gigabyte's
-    /// newer LCD controller instead. Gigabyte's software sends this query first on every card.
-    fn probeLcdEx(self: *Instance, api: *sdk.nvapi.Nvapi, handle: sdk.nvapi.GpuHandle) void {
-        if (self.lcd.ex_probed) return;
-        self.lcd.ex_probed = true;
-        var frame: [lcd.frame_length]u8 = undefined;
-        var reply: [lcd.reply_length]u8 = undefined;
-        lcd.buildExReadFirmware(&frame);
-        if (api.exchange(handle, lcd.ex_address, &frame, &reply) != .answered) {
-            self.host.logMessage(.info, "nothing answered at I2C address 0x76 either, where some cards have Gigabyte's newer LCD controller");
-            return;
-        }
-        var bytes: [lcd.reply_length * 3]u8 = undefined;
-        logParts(self.host, .warn, &.{ "a controller at I2C address 0x76 answered with ", sdk.text.hexBytes(&bytes, &reply), ": this card's LCD may be Gigabyte's newer kind, which rgbctrl does not drive" });
     }
 
     fn writeLcd(self: *Instance, handle: sdk.nvapi.GpuHandle, frame: *const [lcd.frame_length]u8) bool {
-        var api = &self.nvapi.?;
-        if (api.writeRetrying(handle, lcd.address, frame)) return true;
+        const api = self.busFor(handle, true);
+        if (api.writeRetrying(handle, self.lcdAddress(), frame)) return true;
         if (self.lcd.failures == 0) {
             var number: [20]u8 = undefined;
             logParts(self.host, .warn, &.{ "GPU LCD write failed (NVAPI status ", decimal(&number, api.last_status), "); retrying in 30 s" });
@@ -408,6 +532,15 @@ const Instance = struct {
     fn setupLcd(self: *Instance, handle: sdk.nvapi.GpuHandle) bool {
         // Set before the first command, so close() also undoes a setup that failed halfway.
         self.lcd.active = true;
+        const done = switch (self.lcd.kind) {
+            .legacy => self.setupLegacyLcd(handle),
+            .ex => self.setupExLcd(handle),
+        };
+        if (done) self.host.logMessage(.debug, "GPU LCD overlay switched on");
+        return done;
+    }
+
+    fn setupLegacyLcd(self: *Instance, handle: sdk.nvapi.GpuHandle) bool {
         var frame: [lcd.frame_length]u8 = undefined;
         lcd.buildOpen(&frame, true);
         if (!self.writeLcd(handle, &frame)) return false;
@@ -420,8 +553,23 @@ const Instance = struct {
             sdk.win32.Sleep(300);
         }
         lcd.buildOverlay(&frame, self.lcd.flags, self.lcd.seconds);
-        if (!self.writeLcd(handle, &frame)) return false;
-        self.host.logMessage(.debug, "GPU LCD overlay switched on");
+        return self.writeLcd(handle, &frame);
+    }
+
+    /// What Gigabyte's software sends when its LCD page loads, less what cannot be undone unless
+    /// a screen was asked for (see lcd.exSetupSteps). It saves none of it until Apply, and
+    /// rgbctrl never saves.
+    fn setupExLcd(self: *Instance, handle: sdk.nvapi.GpuHandle) bool {
+        var frame: [lcd.frame_length]u8 = undefined;
+        for (lcd.exSetupSteps(self.lcd.screen_set)) |step| {
+            switch (step) {
+                .open => lcd.buildExOpen(&frame, true),
+                .set_mode => lcd.buildExSetMode(&frame, self.lcd.screen),
+                .overlay_switch => lcd.buildExOverlaySwitch(&frame, true),
+                .overlay => lcd.buildExOverlay(&frame, self.lcd.flags, self.overlaySeconds(), self.lcd.color),
+            }
+            if (!self.writeLcd(handle, &frame)) return false;
+        }
         return true;
     }
 
@@ -475,11 +623,18 @@ const Instance = struct {
             self.lcd.last_sent = null;
         }
         const encoded = lcd.encode(self.lcd.flags, readings);
-        if (self.lcd.last_sent) |previous| {
-            if (!lcd.worthSending(self.lcd.flags, previous, encoded) and now_ms -| self.lcd.last_sent_ms < lcd.refresh_after_ms) return;
-        }
         var frame: [lcd.frame_length]u8 = undefined;
-        lcd.buildValues(&frame, encoded);
+        switch (self.lcd.kind) {
+            .legacy => {
+                if (self.lcd.last_sent) |previous| {
+                    if (!lcd.worthSending(self.lcd.flags, previous, encoded) and now_ms -| self.lcd.last_sent_ms < lcd.refresh_after_ms) return;
+                }
+                lcd.buildValues(&frame, encoded);
+            },
+            // Gigabyte's service sends this panel its values every second. How long the panel
+            // keeps values without an update is not known, so rgbctrl does the same.
+            .ex => lcd.buildExValues(&frame, encoded),
+        }
         if (!self.writeLcd(handle, &frame)) return self.lcdFailed(now_ms);
         self.lcd.last_sent = encoded;
         self.lcd.last_sent_ms = now_ms;
@@ -487,10 +642,16 @@ const Instance = struct {
     }
 
     fn restoreLcd(self: *Instance) void {
-        if (!self.lcd.active) return;
-        var api = &(self.nvapi orelse return);
+        if (!self.lcd.active or self.nvapi == null) return;
         const handle = self.lcd.handle orelse return;
+        const api = self.busFor(handle, true);
         var frame: [lcd.frame_length]u8 = undefined;
+        if (self.lcd.kind == .ex) {
+            // The screen stays: this panel cannot report the one it showed before.
+            lcd.buildExOverlaySwitch(&frame, false);
+            _ = api.writeRetrying(handle, lcd.ex_address, &frame);
+            return;
+        }
         lcd.buildOverlay(&frame, 0, 0);
         _ = api.writeRetrying(handle, lcd.address, &frame);
         const original = self.lcd.original orelse return;
@@ -505,12 +666,12 @@ const Instance = struct {
     }
 };
 
-fn queryLcd(api: *sdk.nvapi.Nvapi, handle: sdk.nvapi.GpuHandle, frame: *const [lcd.frame_length]u8, reply: *[lcd.reply_length]u8) sdk.nvapi.Exchange {
-    var result = api.exchange(handle, lcd.address, frame, reply);
+fn queryLcd(api: *sdk.nvapi.Nvapi, handle: sdk.nvapi.GpuHandle, address: u7, frame: *const [lcd.frame_length]u8, reply: *[lcd.reply_length]u8) sdk.nvapi.Exchange {
+    var result = api.exchange(handle, address, frame, reply);
     var tries: u32 = 1;
     while (result != .answered and tries < lcd_query_attempts) : (tries += 1) {
         sdk.win32.Sleep(lcd_query_pause_ms);
-        result = api.exchange(handle, lcd.address, frame, reply);
+        result = api.exchange(handle, address, frame, reply);
     }
     return result;
 }
@@ -520,7 +681,7 @@ fn readPanelState(api: *sdk.nvapi.Nvapi, handle: sdk.nvapi.GpuHandle) ?lcd.Panel
     var reply: [lcd.reply_length]u8 = undefined;
     lcd.buildReadMode(&frame);
     for (0..lcd_query_attempts) |_| {
-        if (queryLcd(api, handle, &frame, &reply) != .answered) return null;
+        if (queryLcd(api, handle, lcd.address, &frame, &reply) != .answered) return null;
         if (lcd.parseState(&reply)) |state| return state;
     }
     return null;
@@ -580,8 +741,25 @@ fn appendText(buffer: []u8, start: usize, text: []const u8) usize {
     return start + text.len;
 }
 
+fn describeMiss(buffer: *[48]u8, miss: QueryMiss) []const u8 {
+    var number: [20]u8 = undefined;
+    var length: usize = 0;
+    switch (miss) {
+        .refused => |status| {
+            length = appendText(buffer, length, "refused, NVAPI status ");
+            length = appendText(buffer, length, decimal(&number, status));
+        },
+        .no_reply => |status| {
+            length = appendText(buffer, length, "no reply, NVAPI status ");
+            length = appendText(buffer, length, decimal(&number, status));
+        },
+        .no_firmware => length = appendText(buffer, length, "no firmware reported"),
+    }
+    return buffer[0..length];
+}
+
 fn logParts(host: sdk.HostApi, level: abi.LogLevel, parts: []const []const u8) void {
-    var buffer: [192]u8 = undefined;
+    var buffer: [256]u8 = undefined;
     var length: usize = 0;
     for (parts) |part| {
         const count = @min(part.len, buffer.len - length);
@@ -641,11 +819,9 @@ fn open(host: *const abi.Host, config: ?*const abi.Json, instance_out: *?*anyopa
         instance_out.* = self;
         return abi.status_ok;
     };
-    // Gigabyte's LCD service runs the card's I2C bus at 400 kHz; RGB writes at another speed
-    // on the same bus were reported to wedge it, so every transaction uses 400 kHz then.
-    if (self.lcd.enabled) self.nvapi.?.speed = sdk.nvapi.i2c_speed_400khz;
-    // The LCD is asked first, before any traffic to the lighting controller, as CodeTorch's
-    // AorusLcd does.
+    // With lcd on, the LCD is asked first, before any traffic to the lighting controller, as
+    // CodeTorch's AorusLcd does; the card whose panel answers then runs all of its I2C at that
+    // panel's speed (see busFor).
     if (self.lcd.enabled and self.findLcd() == .no_card) self.lcd.enabled = false;
     _ = self.discover(true);
     instance_out.* = self;

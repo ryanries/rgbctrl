@@ -1,10 +1,17 @@
 const std = @import("std");
-const text = @import("sdk").text;
+const sdk = @import("sdk");
+const text = sdk.text;
+const Rgb = sdk.abi.Rgb;
 
-// Legacy Gigabyte LCD protocol at 7-bit address 0x61, as documented by the open-source drivers
-// for the RTX 5080 AORUS MASTER ICE (firmware F1.4) and the RTX 5090 MASTER.
+// The RTX 5080 AORUS MASTER ICE ships with either of two LCD controllers under the same PCI
+// identity, both driven with 256-byte zero-padded frames on the card's I2C bus:
+// - legacy, at 0x61: `<opcode> CB 55 AC 38 <arguments>`, as documented by the open-source
+//   drivers for that card (firmware F1.4) and the RTX 5090 MASTER;
+// - ex ("LcdEx" in Gigabyte's software), at 0x76: `<opcode> 01 <arguments>`, as Gigabyte
+//   Control Center 26.09 and its AorusLcdService drive it.
+pub const Kind = enum { legacy, ex };
+
 pub const address: u7 = 0x61;
-/// Gigabyte's newer LCD controller ("LcdEx" in its software), which rgbctrl does not drive.
 pub const ex_address: u7 = 0x76;
 pub const frame_length = 256;
 pub const reply_length = 4;
@@ -17,12 +24,21 @@ const opcode_set_mode: u8 = 0xE5;
 const opcode_set_overlay: u8 = 0xE1;
 const opcode_set_values: u8 = 0xE3;
 
+const ex_opcode_read_firmware: u8 = 0x10;
+const ex_opcode_open: u8 = 0x15;
+const ex_opcode_set_mode: u8 = 0x16;
+const ex_opcode_set_overlay: u8 = 0x17;
+const ex_opcode_set_values: u8 = 0x23;
+
 pub const default_seconds: u8 = 4;
+/// Gigabyte's software offers 1 to 10 s per overlay field on the newer panel.
+pub const ex_max_seconds: u8 = 10;
+pub const default_color = Rgb{ .r = 0xFF, .g = 0xFF, .b = 0xFF };
 pub const refresh_after_ms: u64 = 30_000;
 pub const stale_after_ms: u64 = 5000;
 pub const hold_ms: u64 = 10_000;
 
-/// Cards whose LCD has been tested with this protocol: the RTX 5080 AORUS MASTER ICE.
+/// Cards whose LCD rgbctrl drives: the RTX 5080 AORUS MASTER ICE, with either controller.
 pub fn supports(device_id: u16, subvendor_id: u16, subdevice_id: u16) bool {
     return device_id == 0x2C02 and subvendor_id == 0x1458 and subdevice_id == 0x418C;
 }
@@ -82,11 +98,96 @@ pub fn buildReadMode(frame: *[frame_length]u8) void {
     begin(frame, opcode_read_mode);
 }
 
+fn beginEx(frame: *[frame_length]u8, opcode: u8) void {
+    @memset(frame, 0);
+    frame[0] = opcode;
+    frame[1] = 0x01;
+}
+
 /// The version query Gigabyte's software sends to `ex_address` before it falls back to `address`.
 pub fn buildExReadFirmware(frame: *[frame_length]u8) void {
-    @memset(frame, 0);
-    frame[0] = 0x10;
-    frame[1] = 0x01;
+    beginEx(frame, ex_opcode_read_firmware);
+}
+
+pub fn buildExOpen(frame: *[frame_length]u8, on: bool) void {
+    beginEx(frame, ex_opcode_open);
+    frame[2] = if (on) 1 else 2;
+}
+
+/// Unlike the legacy E5, the screen number goes out as is (7 for the carousel).
+pub fn buildExSetMode(frame: *[frame_length]u8, mode: Mode) void {
+    beginEx(frame, ex_opcode_set_mode);
+    frame[2] = @intFromEnum(mode);
+}
+
+/// The overlay switch alone. Gigabyte's software sends it before every overlay setup, and it
+/// alone switches the overlay off.
+pub fn buildExOverlaySwitch(frame: *[frame_length]u8, on: bool) void {
+    beginEx(frame, ex_opcode_set_overlay);
+    frame[2] = @intFromBool(on);
+}
+
+/// The overlay: one flag bit per field in Metric order, the seconds each field stays up and
+/// the text color.
+pub fn buildExOverlay(frame: *[frame_length]u8, flags: u8, seconds: u8, color: Rgb) void {
+    buildExOverlaySwitch(frame, true);
+    frame[3] = flags;
+    frame[4] = seconds;
+    frame[5] = color.r;
+    frame[6] = color.g;
+    frame[7] = color.b;
+}
+
+/// The legacy E3 fields in the same order, without the magic; bytes 11-12 hold the FPS.
+pub fn buildExValues(frame: *[frame_length]u8, values: Encoded) void {
+    beginEx(frame, ex_opcode_set_values);
+    frame[2] = values.temp;
+    std.mem.writeInt(u16, frame[3..5], values.clock, .big);
+    frame[5] = values.load;
+    std.mem.writeInt(u16, frame[6..8], values.fan, .big);
+    std.mem.writeInt(u16, frame[8..10], values.vram_clock, .big);
+    frame[10] = values.vram;
+    std.mem.writeInt(u16, frame[13..15], values.power, .big);
+}
+
+pub const ExVersion = struct { major: u8, minor: u8 };
+
+/// `10 01 <major> <minor>`; Gigabyte's software takes a zero major version as no panel.
+pub fn parseExFirmware(reply: []const u8) ?ExVersion {
+    if (reply.len < 4 or reply[0] != ex_opcode_read_firmware or reply[1] != 0x01 or reply[2] == 0) return null;
+    return .{ .major = reply[2], .minor = reply[3] };
+}
+
+pub const ExProbe = union(enum) {
+    panel: ExVersion,
+    /// Ask the older controller next, as Gigabyte's software does. A missing reply does not
+    /// prove there is no newer controller, but the older one's query is read-only and harmless.
+    fallback,
+    /// Something answered that is not the newer controller: the LCD stays untouched.
+    unclear,
+};
+
+/// Gigabyte's software takes a failed query and a zero major version as no newer controller.
+/// Unlike it, rgbctrl leaves the card alone when a nonzero reply lacks the `10 01` echo.
+pub fn classifyExProbe(result: sdk.nvapi.Exchange, reply: []const u8) ExProbe {
+    switch (result) {
+        .refused, .no_reply => return .fallback,
+        .busy => return .unclear,
+        .answered => {},
+    }
+    if (reply.len >= 3 and reply[2] == 0) return .fallback;
+    if (parseExFirmware(reply)) |version| return .{ .panel = version };
+    return .unclear;
+}
+
+pub const ExSetupStep = enum { open, set_mode, overlay_switch, overlay };
+
+/// The setup of the newer panel, in the order of Gigabyte's software. This panel cannot report
+/// its screen, so switching it on and changing the screen, which rgbctrl could not undo, happen
+/// only when a screen was asked for; the overlay alone is switched off again on close.
+pub fn exSetupSteps(change_screen: bool) []const ExSetupStep {
+    if (change_screen) return &.{ .open, .set_mode, .overlay_switch, .overlay };
+    return &.{ .overlay_switch, .overlay };
 }
 
 pub fn buildOpen(frame: *[frame_length]u8, on: bool) void {
@@ -287,6 +388,66 @@ test "replies decode the firmware version, the display mode and the panel power"
     try std.testing.expectEqual(@as(?PanelState, null), parseState(&.{ 0xDE, 9, 1, 0 }));
     try std.testing.expectEqual(@as(?PanelState, null), parseState(&.{ 0xD6, 0x14, 0x01, 0x02 }));
     try std.testing.expectEqual(@as(?PanelState, null), parseState(&.{ 0xDE, 1 }));
+}
+
+test "newer panel commands are 256-byte frames with the opcode, 01 and zero padding" {
+    var frame = [_]u8{0xAA} ** frame_length;
+    buildExOpen(&frame, true);
+    try std.testing.expectEqualSlices(u8, &.{ 0x15, 0x01, 0x01 }, frame[0..3]);
+    try expectZeroTail(frame, 3);
+    buildExOpen(&frame, false);
+    try std.testing.expectEqualSlices(u8, &.{ 0x15, 0x01, 0x02 }, frame[0..3]);
+    buildExSetMode(&frame, .faith2);
+    try std.testing.expectEqualSlices(u8, &.{ 0x16, 0x01, 0x01 }, frame[0..3]);
+    try expectZeroTail(frame, 3);
+    buildExSetMode(&frame, .carousel);
+    try std.testing.expectEqual(@as(u8, 7), frame[2]);
+    buildExOverlaySwitch(&frame, false);
+    try std.testing.expectEqualSlices(u8, &.{ 0x17, 0x01, 0x00 }, frame[0..3]);
+    try expectZeroTail(frame, 3);
+    buildExOverlaySwitch(&frame, true);
+    try std.testing.expectEqualSlices(u8, &.{ 0x17, 0x01, 0x01 }, frame[0..3]);
+    try expectZeroTail(frame, 3);
+}
+
+test "newer panel overlay carries the field bits, the seconds and the text color" {
+    var frame = [_]u8{0xAA} ** frame_length;
+    buildExOverlay(&frame, default_metrics, 4, .{ .r = 0x12, .g = 0x34, .b = 0x56 });
+    try std.testing.expectEqualSlices(u8, &.{ 0x17, 0x01, 0x01, 0x8D, 0x04, 0x12, 0x34, 0x56 }, frame[0..8]);
+    try expectZeroTail(frame, 8);
+}
+
+test "newer panel values match the packet of Gigabyte's service, fps left at zero" {
+    var frame = [_]u8{0xAA} ** frame_length;
+    buildExValues(&frame, .{ .temp = 55, .clock = 2400, .load = 37, .fan = 1200, .vram_clock = 15000, .vram = 20, .power = 250 });
+    try std.testing.expectEqualSlices(u8, &.{ 0x23, 0x01, 0x37, 0x09, 0x60, 0x25, 0x04, 0xB0, 0x3A, 0x98, 0x14, 0x00, 0x00, 0x00, 0xFA }, frame[0..15]);
+    try expectZeroTail(frame, 15);
+}
+
+test "newer panel firmware reply needs the echo and a major version" {
+    try std.testing.expectEqual(@as(?ExVersion, .{ .major = 1, .minor = 5 }), parseExFirmware(&.{ 0x10, 0x01, 0x01, 0x05 }));
+    try std.testing.expectEqual(@as(?ExVersion, null), parseExFirmware(&.{ 0x10, 0x01, 0x00, 0x05 }));
+    try std.testing.expectEqual(@as(?ExVersion, null), parseExFirmware(&.{ 0x00, 0x00, 0x00, 0x00 }));
+    try std.testing.expectEqual(@as(?ExVersion, null), parseExFirmware(&.{ 0xD6, 0x14, 0x01, 0x02 }));
+    try std.testing.expectEqual(@as(?ExVersion, null), parseExFirmware(&.{ 0x10, 0x01, 0x01 }));
+}
+
+test "only a refusal, a missing reply or a zero version sends the probe on to the older panel" {
+    const answered = sdk.nvapi.Exchange{ .answered = 1 };
+    try std.testing.expectEqual(ExProbe{ .panel = .{ .major = 1, .minor = 5 } }, classifyExProbe(answered, &.{ 0x10, 0x01, 0x01, 0x05 }));
+    try std.testing.expectEqual(ExProbe.fallback, classifyExProbe(.{ .refused = -1 }, &.{ 0, 0, 0, 0 }));
+    try std.testing.expectEqual(ExProbe.fallback, classifyExProbe(.{ .no_reply = -1 }, &.{ 0, 0, 0, 0 }));
+    try std.testing.expectEqual(ExProbe.fallback, classifyExProbe(answered, &.{ 0x10, 0x01, 0x00, 0x00 }));
+    try std.testing.expectEqual(ExProbe.fallback, classifyExProbe(answered, &.{ 0x00, 0x00, 0x00, 0x00 }));
+    try std.testing.expectEqual(ExProbe.unclear, classifyExProbe(answered, &.{ 0xD6, 0x14, 0x01, 0x02 }));
+    try std.testing.expectEqual(ExProbe.unclear, classifyExProbe(.busy, &.{ 0, 0, 0, 0 }));
+}
+
+test "the newer panel keeps its power and screen unless a screen was asked for" {
+    const overlay_only = exSetupSteps(false);
+    try std.testing.expectEqualSlices(ExSetupStep, &.{ .overlay_switch, .overlay }, overlay_only);
+    for (overlay_only) |step| try std.testing.expect(step != .open and step != .set_mode);
+    try std.testing.expectEqualSlices(ExSetupStep, &.{ .open, .set_mode, .overlay_switch, .overlay }, exSetupSteps(true));
 }
 
 test "metric names map to overlay flags and only the supported cards match" {

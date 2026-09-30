@@ -34,6 +34,16 @@ PC, and the log at `debug` level records every probe and response.
   (firmware 1.0.19.5) kept its factory rainbow on every zone although every write succeeded.
   Zones left untouched (`none`, the default) are cleared as well instead of keeping the effect
   stored on the board, so give every zone you want lit an effect.
+- Key `boot_delay_seconds` (300, 0..900; 0 = no wait): in `run`, lighting writes wait until
+  Windows has been running this long since it started or last woke from sleep or hibernation
+  (a power-on with Fast Startup is such a wake; rgbctrl reads the wake time from
+  `CallNtPowerInformation` and waits the whole time when Windows does not report it), and again
+  this long after rgbctrl sees a resume. The board shows its own effect until then. Effects and
+  frames applied meanwhile are kept and sent at that point in the order of a normal first
+  write, and `persist` refuses until 60 s after them. During that time `apply` leaves the
+  motherboard alone, with warnings in the log. After a cold boot of the X870E AORUS PRO ICE,
+  rgbctrl's writes in the first seconds after Windows started left the I/O cover dark until
+  the next restart, while every other zone took them; the same writes minutes later lit it.
 - `persist`: `CC 47 01`, `CC 5E 00`.
 - Conflicts: Gigabyte Control Center / RGB Fusion, OpenRGB, SignalRGB.
 
@@ -42,7 +52,7 @@ PC, and the log at `debug` level records every probe and response.
 - Match: NVIDIA GPUs whose full PCI identity (device and subsystem) is on the allowlist from
   the protocol research, over NVAPI I2C port 1. The RGB controller is probed only at 7-bit
   address 0x71 (older cards, 8-byte packets) or 0x75 (Blackwell, 64-byte packets); the LCD
-  controller at 0x61, and 0x76 for one diagnostic query, are touched only with `lcd` (below).
+  controllers at 0x76 and 0x61 are touched only with `lcd` (below).
 - Devices: the first allowlisted card (in PCI identity order) is `gpu`; any further card is
   `gpu_<subsystem id>` (for example `gpu_418c`), with `_2`, `_3` appended when that name is
   already taken. NVAPI transactions are serialized with `Local\rgbctrl.nvapi.i2c`; without it
@@ -59,32 +69,56 @@ PC, and the log at `debug` level records every probe and response.
 - `persist`: `AA` (older) or `13 01` (Blackwell); refused while any zone of the card receives
   host frames, because the card saves all zones at once.
 - LCD probe (privileged key `lcd`, off by default; RTX 5080 AORUS MASTER ICE, PCI
-  10DE:2C02 subsystem 1458:418C, only): 256-byte frames `<opcode> CB 55 AC 38 <arguments>`,
-  zero-padded, at 7-bit address 0x61; with `lcd` on, all of the plugin's I2C runs at 400 kHz.
-  When the plugin opens, before any traffic to the lighting controller, `D6` reads the firmware
-  (the reply must start with `D6`, or the LCD stays untouched) and `DE` the current screen and
-  whether the panel is on. Each query is a write followed by a separate read, as Gigabyte's
-  software does; a failed read is repeated after waits of 5, 20 and 50 ms, and the whole query
-  is tried up to three times, 250 ms apart (`DE` also up to three times while its reply can't
-  be read). For the firmware query the log tells one that could not be sent from one that got
-  no reply, with the NVAPI status. When 0x61 stays silent, one version query (`10 01`, 256
-  bytes) goes to 0x76, where Gigabyte's software first looks for its newer LCD controller,
-  which rgbctrl does not drive; the result is logged. Without `lcd_readout` that is all: no
-  later queries and no command that changes the panel.
+  10DE:2C02 subsystem 1458:418C, only). The card has one of two LCD controllers; both take
+  256-byte zero-padded frames. When the plugin opens, before any traffic to the lighting
+  controller, and in the order of Gigabyte Control Center:
+  - Newer controller ("LcdEx") at 7-bit address 0x76, 100 kHz: `10 01` then a 4-byte read. A
+    reply `10 01 <major> <minor>` with a major version above 0 is the panel's firmware. When
+    0x76 refuses the query or never answers it, or reports major version 0, the older
+    controller is asked next, as Gigabyte's software does; any other reply leaves the LCD
+    untouched.
+  - Otherwise the older controller at 0x61, 400 kHz, with frames
+    `<opcode> CB 55 AC 38 <arguments>`: `D6` reads the firmware (the reply must start with
+    `D6`, or the LCD stays untouched) and `DE` the current screen and whether the panel is on.
+
+  Once a panel answers, every transfer to its card, lighting included, runs at that panel's
+  speed, and later probes ask only that panel's address; until then the LCD card's lighting
+  runs at 100 kHz, and other cards keep the driver's speed. Each query is a write followed by a
+  separate read, as Gigabyte's software does; a failed read is repeated after waits of 5, 20
+  and 50 ms, and the whole query is tried up to three times, 250 ms apart (`DE` also up to
+  three times while its reply can't be read). When no panel answers, the log says what each
+  address asked did, with the NVAPI status. Without `lcd_readout` that is all: no later queries
+  and no command that changes the panel.
 - LCD readout (privileged key `lcd_readout`, off by default, needs `lcd`): in `run`, once a
-  sensor has a value, `E7 01` (panel on), `E1` with no fields, `E5` (the built-in screen; left
-  out when `DE` never answered, so the screen stays as it is), `E1` (the fields and the seconds
-  per readout), then `E3` with the values once a second. An `E3` is skipped while no shown
-  value moved by 1 C, 2 %, 50 RPM, 3 W, 15 MHz or 1 % of VRAM, but is sent at least every 30 s.
-  When the plugin closes after that (exit, or a reopen for a config change), `E1` with no
-  fields, `E5` with the original screen and `E7 02` if the panel was off. Uploads (`F1`, `F2`)
-  and the save command (`AA`) are never sent, so nothing is written to the panel's flash. A
-  write that fails with NVAPI status -1 (a transient error of the GPU I2C engine) is sent up to
-  three times in all, 100 ms apart. A failed write is retried every 30 s, the firmware query is
-  repeated every 30 s while the panel does not answer, and the LCD is probed again after three
-  failed writes in a row.
+  sensor has a value:
+  - Newer controller: `17 01 01` (overlay on), `17 01 01 <field bits> <seconds> <R> <G> <B>`,
+    then `23 01` with the values every second: temperature (1 byte), GPU clock (2 bytes,
+    big-endian), load, fan RPM (2), VRAM clock (2), VRAM load, FPS (2, always 0) and power in
+    W (2). With `lcd_screen` set, `15 01 01` (panel on) and `16 01 <screen 0..2>` come first.
+    That is what Gigabyte Control Center sends when its LCD page loads, followed by the values
+    its `AorusLcdService` sends; it saves none of it until Apply. When the plugin closes after
+    that, `17 01 00` (overlay off). This panel cannot report its screen or whether it is on,
+    so without `lcd_screen` neither is changed, and a screen set with it stays until the card
+    loses power.
+  - Older controller: `E7 01` (panel on), `E1` with no fields, `E5` (the built-in screen; left
+    out when `DE` never answered, so the screen stays as it is), `E1` (the fields and the
+    seconds per readout), then `E3` with the values once a second. An `E3` is skipped while no
+    shown value moved by 1 C, 2 %, 50 RPM, 3 W, 15 MHz or 1 % of VRAM, but is sent at least
+    every 30 s. When the plugin closes after that (exit, or a reopen for a config change), `E1`
+    with no fields, `E5` with the original screen and `E7 02` if the panel was off.
+
+  Uploads (`F1`, `F2`, `20`, `21`), saves (`AA`, `13`, `24`), resets (`14`) and the power-off
+  modes (`FA`, `19`) are never sent to the LCD controllers, so nothing is written to the
+  panel's flash. A write that fails with NVAPI status -1 (a transient error of the GPU I2C
+  engine) is sent up to three times in all, 100 ms apart. A failed write is retried every
+  30 s, the firmware query is repeated every 30 s while the panel does not answer, and the LCD
+  is probed again after three failed writes in a row.
 - LCD keys: `lcd_metrics` (`["temp", "load", "fan", "power"]`; also `clock`, `vram_clock` and
-  `vram`), `lcd_seconds` (4, 1..60) and `lcd_screen` (built-in screen 1..3, 1). The values come
+  `vram`), `lcd_seconds` (4, 1..60; the newer controller shows a reading at most 10 s),
+  `lcd_screen` (built-in screen 1..3, anything else ignored with a warning; "Enthusiast 01" to
+  "03" in Gigabyte's software; the older controller uses 1 without it, the newer one keeps its
+  screen) and `lcd_color`
+  (`"#FFFFFF"`; the color of the readings on the newer controller). The values come
   from the `nvidia_gpu` sensors `gpu.temp`, `gpu.freq`, `gpu.load`, `gpu.fan`, `gpu.mem.freq`,
   `gpu.mem.load` and `gpu.power`; a sensor that stops updating keeps its last value for 10 s,
   one that has not appeared yet gets the same 10 s, and then it shows 0 (logged once). The

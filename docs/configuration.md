@@ -146,10 +146,11 @@ the current hardware settings of a device when all of these hold: a hardware eff
 applied since the last save, the device's hardware effects have not changed for 60 s, rgbctrl
 has been running for at least 60 s, and the last save attempt of that device was at least 60 s
 ago. Plugins refuse while saving would be unsafe
-(the Keychron keyboard and the GPU while any of their zones receives host frames); rgbctrl
-retries later and warns once when a device has not been saved for 10 minutes. `apply`, `list`
-and stopping the scheduled task never save. Supported by `gigabyte_fusion2`, `gigabyte_gpu`
-and `keychron`.
+(the Keychron keyboard and the GPU while any of their zones receives host frames, and the
+motherboard while its writes wait for `boot_delay_seconds` and for 60 s after them);
+rgbctrl retries later and warns once when a device has not been saved for 10 minutes. `apply`,
+`list` and stopping the scheduled task never save. Supported by `gigabyte_fusion2`,
+`gigabyte_gpu` and `keychron`.
 
 ## Example
 

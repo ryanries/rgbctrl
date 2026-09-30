@@ -14,6 +14,7 @@ pub const gpu_port: u8 = 1;
 pub const i2c_info_version: u32 = @sizeOf(I2cInfoV3) | (3 << 16);
 // NV_I2C_SPEED values: the default keeps the bus at its current speed.
 pub const i2c_speed_default: u32 = 0;
+pub const i2c_speed_100khz: u32 = 4;
 pub const i2c_speed_400khz: u32 = 6;
 
 pub const GpuHandle = *anyopaque;

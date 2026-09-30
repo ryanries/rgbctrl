@@ -402,4 +402,45 @@ pub fn isValid(handle: HANDLE) bool {
     return handle != INVALID_HANDLE_VALUE;
 }
 
+/// Milliseconds since Windows started or last woke from sleep or hibernation, which includes a
+/// power-on with Fast Startup (GetTickCount64 alone keeps counting through all of these), or
+/// null when Windows does not say when it last woke.
+pub fn msSinceBootOrWake() ?u64 {
+    const last_wake_ms = lastWakeMs() orelse return null;
+    return sinceBootOrWake(GetTickCount64(), last_wake_ms);
+}
+
+// A wake time past the uptime reads as a wake just now, so a wait measured from it runs in full.
+fn sinceBootOrWake(uptime_ms: u64, last_wake_ms: u64) u64 {
+    return uptime_ms -| last_wake_ms;
+}
+
+const power_information_last_wake_time: i32 = 14;
+const CallNtPowerInformationFn = *const fn (level: i32, input: ?*anyopaque, input_size: u32, output: ?*anyopaque, output_size: u32) callconv(.winapi) i32;
+
+// CallNtPowerInformation(LastWakeTime) gives the interrupt time of the last wake in 100 ns
+// units, 0 before the first; interrupt time and GetTickCount64 both count from boot, sleep
+// included.
+fn lastWakeMs() ?u64 {
+    const module = LoadLibraryExW(L("powrprof.dll"), null, LOAD_LIBRARY_SEARCH_SYSTEM32) orelse return null;
+    defer _ = FreeLibrary(module);
+    const address = GetProcAddress(module, "CallNtPowerInformation") orelse return null;
+    const call_nt_power_information: CallNtPowerInformationFn = @ptrCast(address);
+    var last_wake: u64 = 0;
+    if (call_nt_power_information(power_information_last_wake_time, null, 0, &last_wake, @sizeOf(u64)) != 0) return null;
+    return last_wake / 10_000;
+}
+
+test "the time since boot or wake counts from the last wake, and from boot before the first" {
+    const testing = @import("std").testing;
+    try testing.expectEqual(@as(u64, 90_000), sinceBootOrWake(90_000, 0));
+    try testing.expectEqual(@as(u64, 30_000), sinceBootOrWake(90_000, 60_000));
+    try testing.expectEqual(@as(u64, 0), sinceBootOrWake(90_000, 95_000));
+}
+
+test "Windows reports its last wake, and the time since it never exceeds the uptime" {
+    const since = msSinceBootOrWake() orelse return error.TestUnexpectedResult;
+    try @import("std").testing.expect(since <= GetTickCount64());
+}
+
 pub const L = @import("std").unicode.utf8ToUtf16LeStringLiteral;

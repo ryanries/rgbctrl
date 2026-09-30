@@ -14,8 +14,58 @@ const feature_timeout_ms: u32 = 500;
 const device_id = "motherboard";
 const device_name = "Gigabyte X870E AORUS PRO ICE";
 const hardware_effects = abi.effectBit(.off) | abi.effectBit(.static) | abi.effectBit(.breathing) | abi.effectBit(.flash) | abi.effectBit(.cycle);
+const default_boot_delay_seconds: u32 = 300;
+const max_boot_delay_seconds: u32 = 900;
+// A save waits this long after held writes went out, as the host waits after any change.
+const save_settle_ms: u64 = 60_000;
 
 const OpenResult = error{ NotFound, Busy, Access, DeviceLost };
+
+const HeldEffect = struct {
+    effect: protocol.HardwareEffect,
+    speed: u32,
+    brightness: u32,
+    color: abi.Rgb,
+};
+
+/// When a resident run may write the lighting and save it. After a cold boot, rgbctrl's writes
+/// in the first seconds after Windows started left the I/O cover of the X870E AORUS PRO ICE
+/// (firmware 1.0.19.5) dark until the next restart, while the same writes minutes later lit it.
+/// So writes wait until Windows has been up `delay_ms` since it started or last woke (a power-on
+/// with Fast Startup is a wake from hibernation), and for `delay_ms` again after every resume.
+/// Measuring from boot or wake also keeps the wait across a reopen for a config change. When
+/// Windows does not say when it last woke (null), the wake counts as just now.
+const WriteGate = struct {
+    delay_ms: u64,
+    // On the host clock: writes wait while it is below this.
+    hold_until_ms: u64 = 0,
+    released_at_ms: ?u64 = null,
+
+    fn afterStart(delay_ms: u64, now_ms: u64, since_boot_or_wake_ms: ?u64) WriteGate {
+        const remaining = delay_ms -| (since_boot_or_wake_ms orelse 0);
+        return .{ .delay_ms = delay_ms, .hold_until_ms = if (remaining > 0) now_ms + remaining else 0 };
+    }
+
+    /// `apply` cannot hold writes for later, so during the wait it leaves the board alone.
+    fn tooEarlyForApply(delay_ms: u64, since_boot_or_wake_ms: ?u64) bool {
+        return (since_boot_or_wake_ms orelse 0) < delay_ms;
+    }
+
+    fn afterResume(self: *WriteGate, now_ms: u64) void {
+        if (self.delay_ms != 0) self.hold_until_ms = now_ms + self.delay_ms;
+    }
+
+    fn holding(self: WriteGate, now_ms: u64) bool {
+        return now_ms < self.hold_until_ms;
+    }
+
+    /// Saving waits for held writes and then for a quiet minute after they went out.
+    fn saveAllowed(self: WriteGate, now_ms: u64, writes_held: bool) bool {
+        if (writes_held or self.holding(now_ms)) return false;
+        const released = self.released_at_ms orelse return true;
+        return now_ms -| released >= save_settle_ms;
+    }
+};
 
 const Instance = struct {
     host: sdk.HostApi,
@@ -46,6 +96,69 @@ const Instance = struct {
     pending_direct_mask: bool = false,
     first_write_init_pending: bool = true,
     slot_reset_pending: bool = true,
+    // See WriteGate; while it holds, effects and frames are kept and sent by tick.
+    gate: WriteGate = .{ .delay_ms = 0 },
+    held_any: bool = false,
+    held_effects: [protocol.zone_count]?HeldEffect = [_]?HeldEffect{null} ** protocol.zone_count,
+    // `apply` cannot hold writes for later, so right after Windows started it refuses them.
+    refuse_early_apply: bool = false,
+    wake_time_unknown: bool = false,
+    refusal_logged: bool = false,
+
+    /// True when a lighting write has to wait; the first one says so in the log.
+    fn holdWrite(self: *Instance) bool {
+        const now_ms = self.host.nowMs();
+        if (!self.gate.holding(now_ms)) return false;
+        if (!self.held_any) {
+            self.held_any = true;
+            self.host.info("the motherboard lighting waits {d} s more (boot_delay_seconds), as writes right after a cold boot left the I/O cover dark", .{(self.gate.hold_until_ms - now_ms + 999) / 1000});
+        }
+        return true;
+    }
+
+    fn refuseEarlyApply(self: *Instance) bool {
+        if (!self.refuse_early_apply) return false;
+        if (!self.refusal_logged) {
+            self.refusal_logged = true;
+            if (self.wake_time_unknown) {
+                self.host.warn("Windows did not report when it last started or woke, so apply leaves the motherboard alone for boot_delay_seconds; 0 there lets apply write", .{});
+            } else {
+                self.host.warn("Windows started or woke less than boot_delay_seconds ago, so apply leaves the motherboard alone: writes right after a cold boot left the I/O cover dark; run apply again later", .{});
+            }
+        }
+        return true;
+    }
+
+    fn releaseHeldWrites(self: *Instance) i32 {
+        const now_ms = self.host.nowMs();
+        if (!self.held_any or self.gate.holding(now_ms)) return abi.status_ok;
+        const held_effects = self.held_effects;
+        self.held_any = false;
+        self.held_effects = [_]?HeldEffect{null} ** protocol.zone_count;
+        // A board that is gone now gets every zone again from the host once it is back.
+        if (!self.present or self.device == null) return abi.status_ok;
+        self.host.info("sending the motherboard lighting held back until now", .{});
+        self.gate.released_at_ms = now_ms;
+        for (held_effects, 0..) |maybe_effect, zone_index| {
+            const effect = maybe_effect orelse continue;
+            const status = self.writeSlotEffect(@enumFromInt(zone_index), effect.effect, effect.speed, effect.brightness, effect.color);
+            if (status != abi.status_ok) return status;
+        }
+        return self.flushDirtyZones();
+    }
+
+    fn flushDirtyZones(self: *Instance) i32 {
+        for (0..protocol.argb_zone_count) |index| {
+            const status = self.flushArgbZone(index);
+            if (status != abi.status_ok) return status;
+        }
+        const now_ms = self.host.nowMs();
+        for (0..protocol.one_led_zone_count) |index| {
+            const status = self.flushOneLedZone(index, now_ms);
+            if (status != abi.status_ok) return status;
+        }
+        return abi.status_ok;
+    }
 
     fn initialize(self: *Instance) void {
         for (protocol.zone_specs, 0..) |zone_spec, index| {
@@ -184,6 +297,11 @@ const Instance = struct {
         self.applyCapabilities();
         self.first_write_init_pending = true;
         self.slot_reset_pending = true;
+        // The slot reset of the next first write clears every zone on the board, so frames the
+        // host sends again unchanged must go out again.
+        @memset(&self.argb_sent_valid, false);
+        @memset(&self.one_led_sent_valid, false);
+        @memset(&self.one_led_last_write_ms, 0);
     }
 
     fn applyCapabilities(self: *Instance) void {
@@ -361,12 +479,26 @@ fn rgbSlicesEqual(first: []const abi.Rgb, second: []const abi.Rgb) bool {
 }
 
 fn open(host: *const abi.Host, config: ?*const abi.Json, instance_out: *?*anyopaque) callconv(.c) i32 {
-    _ = config;
     panic_host = host;
     sdk.panic.hook = reportPanic;
     const self = std.heap.page_allocator.create(Instance) catch return abi.status_fail;
     self.* = .{ .host = .{ .host = host } };
     self.initialize();
+    const delay_seconds: u32 = @intCast(self.host.configInt(config, "boot_delay_seconds", default_boot_delay_seconds, 0, max_boot_delay_seconds));
+    const delay_ms = @as(u64, delay_seconds) * 1000;
+    const since_boot_or_wake_ms = sdk.win32.msSinceBootOrWake();
+    if (since_boot_or_wake_ms) |since| self.host.debug("Windows started or last woke {d} s ago", .{since / 1000});
+    switch (self.host.mode()) {
+        abi.mode_run => {
+            if (since_boot_or_wake_ms == null and delay_ms > 0) self.host.warn("Windows did not report when it last started or woke, so the motherboard lighting waits the whole boot_delay_seconds", .{});
+            self.gate = WriteGate.afterStart(delay_ms, self.host.nowMs(), since_boot_or_wake_ms);
+        },
+        abi.mode_apply => {
+            self.wake_time_unknown = since_boot_or_wake_ms == null;
+            self.refuse_early_apply = WriteGate.tooEarlyForApply(delay_ms, since_boot_or_wake_ms);
+        },
+        else => {},
+    }
     self.openAndIdentify() catch |err| {
         switch (err) {
             error.NotFound => {
@@ -442,6 +574,7 @@ fn setHwEffect(pointer: ?*anyopaque, device_index: u32, zone_index: u32, effect:
         .cycle => .cycle,
         else => return abi.status_unsupported,
     };
+    if (self.refuseEarlyApply()) return abi.status_busy;
     if (protocol.isArgb(zone)) {
         const bit = protocol.spec(zone).direct_mask_bit;
         if ((self.host_stream_mask & bit) != 0) {
@@ -453,6 +586,11 @@ fn setHwEffect(pointer: ?*anyopaque, device_index: u32, zone_index: u32, effect:
         self.one_led_dirty[protocol.oneLedIndex(zone)] = false;
     }
     const color = effect.color(0);
+    if (self.holdWrite()) {
+        self.held_effects[zone_index] = .{ .effect = hardware_effect, .speed = effect.speed, .brightness = effect.brightness, .color = color };
+        return abi.status_ok;
+    }
+    self.held_effects[zone_index] = null;
     return self.writeSlotEffect(zone, hardware_effect, effect.speed, effect.brightness, color);
 }
 
@@ -462,6 +600,8 @@ fn setLeds(pointer: ?*anyopaque, device_index: u32, zone_index: u32, colors: [*]
     if (!self.zoneHasCapabilities(zone_index)) return abi.status_unsupported;
     const zone: protocol.Zone = @enumFromInt(zone_index);
     if ((self.zone_infos[zone_index].flags & abi.zone_host_frames) == 0) return abi.status_unsupported;
+    // Frames replace an effect still held for this zone.
+    self.held_effects[zone_index] = null;
     if (protocol.isArgb(zone)) {
         const argb_index_value = protocol.argbIndex(zone);
         const led_count = self.argb_led_counts[argb_index_value];
@@ -487,27 +627,22 @@ fn flush(pointer: ?*anyopaque, device_index: u32) callconv(.c) i32 {
     const self = instanceFrom(pointer);
     if (device_index != 0) return abi.status_argument;
     if (!self.present) return abi.status_device_lost;
-    for (0..protocol.argb_zone_count) |index| {
-        const status = self.flushArgbZone(index);
-        if (status != abi.status_ok) return status;
-    }
-    const now_ms = self.host.nowMs();
-    for (0..protocol.one_led_zone_count) |index| {
-        const status = self.flushOneLedZone(index, now_ms);
-        if (status != abi.status_ok) return status;
-    }
-    return abi.status_ok;
+    if (self.refuseEarlyApply()) return abi.status_busy;
+    // The frames stay dirty and go out when the hold ends.
+    if (self.holdWrite()) return abi.status_ok;
+    return self.flushDirtyZones();
 }
 
 fn tick(pointer: ?*anyopaque, now_ms: u64) callconv(.c) i32 {
     _ = now_ms;
-    _ = pointer;
-    return abi.status_ok;
+    return instanceFrom(pointer).releaseHeldWrites();
 }
 
 fn rescan(pointer: ?*anyopaque, reason: u32) callconv(.c) i32 {
     const self = instanceFrom(pointer);
     const was_present = self.present;
+    // The board may have lost power, as after a cold boot; the host re-applies every zone next.
+    if (reason == abi.rescan_resume and self.host.mode() == abi.mode_run) self.gate.afterResume(self.host.nowMs());
     if (reason == abi.rescan_hotplug or reason == abi.rescan_recover) {
         if (self.present and self.device != null) return abi.status_ok;
     }
@@ -537,6 +672,7 @@ fn persist(pointer: ?*anyopaque, device_index: u32) callconv(.c) i32 {
     const self = instanceFrom(pointer);
     if (device_index != 0) return abi.status_argument;
     if (!self.present or self.device == null) return abi.status_device_lost;
+    if (!self.gate.saveAllowed(self.host.nowMs(), self.held_any)) return abi.status_busy;
     var packet: [protocol.report_length]u8 = undefined;
     protocol.buildSimpleValue(&packet, protocol.command_persist_flag, 1);
     self.setFeature(&packet) catch {
@@ -557,6 +693,7 @@ fn persist(pointer: ?*anyopaque, device_index: u32) callconv(.c) i32 {
 const plugin = abi.Plugin{
     .name = "gigabyte_fusion2",
     .version = "0.1.0",
+    .tick_interval_ms = 1000,
     .transports = abi.transport_hid,
     .open = open,
     .close = close,
@@ -578,4 +715,44 @@ export fn rgbctrl_plugin_entry(host_abi_version: u32) callconv(.c) ?*const abi.P
 
 test {
     _ = protocol;
+}
+
+test "writes wait the delay after Windows started or woke, and the delay again after a resume" {
+    var gate = WriteGate.afterStart(300_000, 1_000, 25_000);
+    try std.testing.expect(gate.holding(1_000));
+    try std.testing.expect(gate.holding(275_999));
+    try std.testing.expect(!gate.holding(276_000));
+    gate.afterResume(4_000_000);
+    try std.testing.expect(gate.holding(4_299_999));
+    try std.testing.expect(!gate.holding(4_300_000));
+    const late = WriteGate.afterStart(300_000, 1_000, 3_600_000);
+    try std.testing.expect(!late.holding(1_000));
+    var off = WriteGate.afterStart(0, 1_000, 5_000);
+    try std.testing.expect(!off.holding(1_000));
+    off.afterResume(2_000);
+    try std.testing.expect(!off.holding(2_000));
+}
+
+test "an unknown wake time counts as a wake just now, for run and for apply" {
+    const gate = WriteGate.afterStart(300_000, 1_000, null);
+    try std.testing.expect(gate.holding(300_999));
+    try std.testing.expect(!gate.holding(301_000));
+    try std.testing.expect(WriteGate.tooEarlyForApply(300_000, null));
+    try std.testing.expect(!WriteGate.tooEarlyForApply(0, null));
+    try std.testing.expect(WriteGate.tooEarlyForApply(300_000, 299_999));
+    try std.testing.expect(!WriteGate.tooEarlyForApply(300_000, 300_000));
+}
+
+test "a save waits for held writes and a quiet minute after they went out" {
+    // Windows up 10 s at the start: the writes wait until 290 s on the host clock.
+    var gate = WriteGate.afterStart(300_000, 0, 10_000);
+    try std.testing.expect(!gate.saveAllowed(100_000, false));
+    try std.testing.expect(!gate.saveAllowed(100_000, true));
+    // The wait is over, but tick has not sent the held writes yet.
+    try std.testing.expect(!gate.saveAllowed(300_000, true));
+    gate.released_at_ms = 300_000;
+    try std.testing.expect(!gate.saveAllowed(359_999, false));
+    try std.testing.expect(gate.saveAllowed(360_000, false));
+    const never_held = WriteGate.afterStart(300_000, 0, 600_000);
+    try std.testing.expect(never_held.saveAllowed(0, false));
 }
