@@ -132,6 +132,11 @@ const LcdPanel = struct {
     // Whether lcd_screen was given; the newer controller changes screens only then.
     screen_set: bool = false,
     color: abi.Rgb = lcd.default_color,
+    // Whether lcd_color was given: only then does the newer controller get it for the readings
+    // of its built-in screens too.
+    color_set: bool = false,
+    // lcd_logo_color, for the artwork of the newer controller's built-in screens.
+    logo_color: ?abi.Rgb = null,
     kind: lcd.Kind = .legacy,
     // The card of the panel; kept when a later probe fails, so close() can still restore it.
     handle: ?sdk.nvapi.GpuHandle = null,
@@ -301,8 +306,19 @@ const Instance = struct {
             const parsed = if (self.host.asString(node)) |color_text| sdk.color.parseHex(color_text) else null;
             if (parsed) |color| {
                 self.lcd.color = color;
+                self.lcd.color_set = true;
             } else {
-                self.host.logMessage(.warn, "lcd_color must be a color such as \"#FFFFFF\"; using white");
+                self.host.logMessage(.warn, "lcd_color must be a color such as \"#FFFFFF\"; ignored");
+            }
+        }
+        if (self.host.member(config, "lcd_logo_color")) |node| {
+            const parsed = if (self.host.asString(node)) |color_text| sdk.color.parseHex(color_text) else null;
+            if (parsed == null) {
+                self.host.logMessage(.warn, "lcd_logo_color must be a color such as \"#000000\"; ignored");
+            } else if (!self.lcd.screen_set) {
+                self.host.logMessage(.warn, "lcd_logo_color colors a built-in screen, so it needs lcd_screen; ignored");
+            } else {
+                self.lcd.logo_color = parsed;
             }
         }
         const node = self.host.member(config, "lcd_metrics") orelse return;
@@ -390,6 +406,7 @@ const Instance = struct {
             const digits = "0123456789ABCDEF";
             const version = [_]u8{ 'F', digits[firmware >> 4], '.', digits[firmware & 0xF] };
             self.logLcdFound("the older controller, firmware ", &version, "");
+            if (self.lcd.readout and self.lcd.logo_color != null) self.host.logMessage(.warn, "the older GPU LCD controller ignores lcd_logo_color");
             return .found;
         }
         if (!saw_card) {
@@ -521,6 +538,7 @@ const Instance = struct {
 
     fn writeLcd(self: *Instance, handle: sdk.nvapi.GpuHandle, frame: *const [lcd.frame_length]u8) bool {
         const api = self.busFor(handle, true);
+        traceLcdWrite(self.host, frame);
         if (api.writeRetrying(handle, self.lcdAddress(), frame)) return true;
         if (self.lcd.failures == 0) {
             var number: [20]u8 = undefined;
@@ -557,16 +575,28 @@ const Instance = struct {
     }
 
     /// What Gigabyte's software sends when its LCD page loads, less what cannot be undone unless
-    /// a screen was asked for (see lcd.exSetupSteps). It saves none of it until Apply, and
-    /// rgbctrl never saves.
+    /// it was asked for (see lcd.exSetupSteps), plus the colors of its lighting page. It saves
+    /// none of it until Apply, and rgbctrl never saves.
     fn setupExLcd(self: *Instance, handle: sdk.nvapi.GpuHandle) bool {
         var frame: [lcd.frame_length]u8 = undefined;
-        for (lcd.exSetupSteps(self.lcd.screen_set)) |step| {
+        var areas: [lcd.ex_area_count]lcd.ExAreaColor = undefined;
+        const text_color: ?abi.Rgb = if (self.lcd.color_set) self.lcd.color else null;
+        // Colors only for a built-in screen that rgbctrl set, so their areas are known to exist.
+        const area_colors = if (self.lcd.screen_set) lcd.exAreaColors(&areas, self.lcd.screen, text_color, self.lcd.logo_color) else areas[0..0];
+        for (lcd.exSetupSteps(self.lcd.screen_set, area_colors.len > 0)) |step| {
             switch (step) {
                 .open => lcd.buildExOpen(&frame, true),
                 .set_mode => lcd.buildExSetMode(&frame, self.lcd.screen),
                 .overlay_switch => lcd.buildExOverlaySwitch(&frame, true),
                 .overlay => lcd.buildExOverlay(&frame, self.lcd.flags, self.overlaySeconds(), self.lcd.color),
+                .area_colors => {
+                    for (area_colors) |area_color| {
+                        lcd.buildExAreaColor(&frame, area_color.area, area_color.color);
+                        if (!self.writeLcd(handle, &frame)) return false;
+                        sdk.win32.Sleep(lcd.ex_area_pause_ms);
+                    }
+                    continue;
+                },
             }
             if (!self.writeLcd(handle, &frame)) return false;
         }
@@ -647,21 +677,25 @@ const Instance = struct {
         const api = self.busFor(handle, true);
         var frame: [lcd.frame_length]u8 = undefined;
         if (self.lcd.kind == .ex) {
-            // The screen stays: this panel cannot report the one it showed before.
+            // The screen and the colors stay: this panel cannot report the ones it had before.
             lcd.buildExOverlaySwitch(&frame, false);
+            traceLcdWrite(self.host, &frame);
             _ = api.writeRetrying(handle, lcd.ex_address, &frame);
             return;
         }
         lcd.buildOverlay(&frame, 0, 0);
+        traceLcdWrite(self.host, &frame);
         _ = api.writeRetrying(handle, lcd.address, &frame);
         const original = self.lcd.original orelse return;
         if (original.mode != self.lcd.screen) {
             lcd.buildSetMode(&frame, original.mode);
+            traceLcdWrite(self.host, &frame);
             _ = api.writeRetrying(handle, lcd.address, &frame);
         }
         if (original.on) return;
         sdk.win32.Sleep(300);
         lcd.buildOpen(&frame, false);
+        traceLcdWrite(self.host, &frame);
         _ = api.writeRetrying(handle, lcd.address, &frame);
     }
 };
@@ -766,6 +800,14 @@ fn logParts(host: sdk.HostApi, level: abi.LogLevel, parts: []const []const u8) v
         length = appendText(&buffer, length, part[0..count]);
     }
     host.logMessage(level, buffer[0..length]);
+}
+
+/// Every command frame for the LCD, without its zero padding, for a trace-level log. All of
+/// them fit in the first 32 bytes.
+fn traceLcdWrite(host: sdk.HostApi, frame: *const [lcd.frame_length]u8) void {
+    var hex: [96]u8 = undefined;
+    const command = std.mem.trimEnd(u8, frame[0..32], &.{0});
+    logParts(host, .trace, &.{ "LCD write ", sdk.text.hexBytes(&hex, command) });
 }
 
 fn decimal(buffer: *[20]u8, value: i64) []const u8 {

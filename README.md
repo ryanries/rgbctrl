@@ -172,8 +172,9 @@ two steps, both in the admin-only base config `%ProgramData%\rgbctrl\rgbctrl.jso
    ```
 
 2. `lcd_readout` also lets it send the commands that change what the panel shows: the overlay
-   and its values, and the panel's power and built-in screen (on the newer controller only
-   with `lcd_screen`, see below). Only add it once step 1 finds the panel.
+   and its values, and the panel's power, built-in screen and colors (on the newer controller
+   only with `lcd_screen` and the color keys, see below). Only add it once step 1 finds the
+   panel.
 
    ```json
    { "plugins": { "gigabyte_gpu": { "lcd": true, "lcd_readout": true } } }
@@ -184,16 +185,15 @@ two steps, both in the admin-only base config `%ProgramData%\rgbctrl\rgbctrl.jso
    full power-off (switching the power supply off) and, once, after an image upload, which
    Gigabyte's own software can also do.
 
-The readouts, the seconds each one stays up, the built-in screen and, on the newer controller,
-the color of the readings can go in either file:
+The readouts, the seconds each one stays up, the built-in screen and its colors can go in
+either file:
 
 ```json
 {
   "plugins": {
     "gigabyte_gpu": {
       "lcd_metrics": ["temp", "load", "fan", "power"],
-      "lcd_seconds": 4,
-      "lcd_color": "#FFFFFF"
+      "lcd_seconds": 4
     }
   }
 }
@@ -205,16 +205,33 @@ the color of the readings can go in either file:
   built-in screens ("Enthusiast 01" to "03" in Gigabyte's software). The older controller
   switches to it (screen 1 without the key). The newer one cannot report its screen, so rgbctrl
   could not switch it back: without `lcd_screen` it puts the overlay on the screen the panel
-  shows (over the Chibi Time mascot on the tested card), and only with `lcd_screen` does it
-  switch the panel on and change the screen.
-- `lcd_seconds` is 1 to 60, but the newer controller shows a reading at most 10 s. `lcd_color`
-  (`"#RRGGBB"`, white by default) is ignored by the older controller.
+  shows (over the Chibi Time mascot on the tested card, where it did not appear), and only
+  with `lcd_screen` does it switch the panel on and change the screen.
+- `lcd_seconds` is 1 to 60, but the newer controller shows a reading at most 10 s.
+- On the newer controller, the built-in screens draw the readings and the artwork beside them
+  (the eagle of screen 1, the helmet of screen 2, the three heads of screen 3) in colors of
+  their own, a rainbow wave on the tested card. On the screen that `lcd_screen` picks,
+  `lcd_color` (`"#RRGGBB"`) sets the readings to a static color and `lcd_logo_color` the
+  artwork; black should hide the artwork. Without them the panel keeps its colors, which
+  rgbctrl cannot read back. The overlay on other screens also takes `lcd_color`, and is white
+  without it. The older controller ignores both keys. For white readings without artwork on
+  screen 1:
+
+  ```json
+  {
+    "plugins": {
+      "gigabyte_gpu": { "lcd_screen": 1, "lcd_color": "#FFFFFF", "lcd_logo_color": "#000000" }
+    }
+  }
+  ```
+
 - The panel shows only what rgbctrl sends. When rgbctrl stops feeding it (`rgbctrl stop`, or a
   config change that turns `lcd` or `lcd_readout` off or reloads the plugin), the overlay goes.
   The older controller then returns to the screen it showed before, switching off again if it
-  was off. A screen that `lcd_screen` set on the newer one stays until the card loses power;
-  Gigabyte's software treats such a change as unsaved, so the panel should then show the
-  screen saved in it again. When the process is killed, the last values stay on the panel.
+  was off. A screen or colors that rgbctrl set on the newer one stay until the card loses
+  power; Gigabyte's software treats such changes as unsaved, so the panel should then show
+  the screen and colors saved in it again. When the process is killed, the last values stay
+  on the panel.
 - Each update holds the card's I2C bus for a few milliseconds, about 25 ms on the newer
   controller. The older controller gets an update when the shown values change visibly and at
   least every 30 s. The newer one gets one every second, as Gigabyte's service sends them,

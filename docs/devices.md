@@ -95,11 +95,18 @@ PC, and the log at `debug` level records every probe and response.
     then `23 01` with the values every second: temperature (1 byte), GPU clock (2 bytes,
     big-endian), load, fan RPM (2), VRAM clock (2), VRAM load, FPS (2, always 0) and power in
     W (2). With `lcd_screen` set, `15 01 01` (panel on) and `16 01 <screen 0..2>` come first.
-    That is what Gigabyte Control Center sends when its LCD page loads, followed by the values
-    its `AorusLcdService` sends; it saves none of it until Apply. When the plugin closes after
-    that, `17 01 00` (overlay off). This panel cannot report its screen or whether it is on,
-    so without `lcd_screen` neither is changed, and a screen set with it stays until the card
-    loses power.
+    With `lcd_screen` and `lcd_color` or `lcd_logo_color` set, the overlay is followed by
+    `12 01 01 06 0A <R> <G> <B> 00 <area>` for each color area of that screen that a key
+    covers, 120 ms apart: a static color at the speed and brightness Gigabyte's lighting page
+    starts with. Areas 1 and 2 are the label and value of the readings, 0 the artwork, and on
+    screen 3 also 3 and 4 (Gigabyte's regions 101 to 105). That is what Gigabyte Control Center
+    sends when its LCD page loads, followed by the values its `AorusLcdService` sends, and the
+    `12 01` frames of its lighting page, which re-sends all five areas each time where rgbctrl
+    sends only the areas a key covers. Its managed code never sends this panel's LED save
+    (`13 01`); what the native save its Apply calls does on this panel is not known. rgbctrl
+    saves nothing. When the plugin closes after that, `17 01 00` (overlay off). This panel
+    cannot report its screen, its colors or whether it is on, so without those keys none of
+    them is changed, and what they set stays until the card loses power.
   - Older controller: `E7 01` (panel on), `E1` with no fields, `E5` (the built-in screen; left
     out when `DE` never answered, so the screen stays as it is), `E1` (the fields and the
     seconds per readout), then `E3` with the values once a second. An `E3` is skipped while no
@@ -117,12 +124,14 @@ PC, and the log at `debug` level records every probe and response.
   `vram`), `lcd_seconds` (4, 1..60; the newer controller shows a reading at most 10 s),
   `lcd_screen` (built-in screen 1..3, anything else ignored with a warning; "Enthusiast 01" to
   "03" in Gigabyte's software; the older controller uses 1 without it, the newer one keeps its
-  screen) and `lcd_color`
-  (`"#FFFFFF"`; the color of the readings on the newer controller). The values come
-  from the `nvidia_gpu` sensors `gpu.temp`, `gpu.freq`, `gpu.load`, `gpu.fan`, `gpu.mem.freq`,
-  `gpu.mem.load` and `gpu.power`; a sensor that stops updating keeps its last value for 10 s,
-  one that has not appeared yet gets the same 10 s, and then it shows 0 (logged once). The
-  panel's FPS field stays 0.
+  screen), `lcd_color` (`"#RRGGBB"`; on the newer controller the color of the overlay, white
+  without it, and of the readings on the built-in screen set by `lcd_screen`, which keeps its
+  own colors without it) and `lcd_logo_color` (the artwork of that screen on the newer
+  controller; ignored without `lcd_screen`). Every command frame sent to the LCD is logged at
+  `trace` level. The values come from the `nvidia_gpu` sensors `gpu.temp`, `gpu.freq`,
+  `gpu.load`, `gpu.fan`, `gpu.mem.freq`, `gpu.mem.load` and `gpu.power`; a sensor that stops
+  updating keeps its last value for 10 s, one that has not appeared yet gets the same 10 s, and
+  then it shows 0 (logged once). The panel's FPS field stays 0.
 - Conflicts: Gigabyte Control Center (including its `AorusLcdService` for the LCD), AORUS
   Engine, OpenRGB.
 

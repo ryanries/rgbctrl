@@ -25,10 +25,20 @@ const opcode_set_overlay: u8 = 0xE1;
 const opcode_set_values: u8 = 0xE3;
 
 const ex_opcode_read_firmware: u8 = 0x10;
+const ex_opcode_set_area: u8 = 0x12;
 const ex_opcode_open: u8 = 0x15;
 const ex_opcode_set_mode: u8 = 0x16;
 const ex_opcode_set_overlay: u8 = 0x17;
 const ex_opcode_set_values: u8 = 0x23;
+
+// An effect for one color area of the newer panel ("LedSet" in Gigabyte's software): style 1 is
+// static (2 cycle, 3 gradient, 4 wave), and speed 6 and brightness 10 are the tops of its
+// lighting page's sliders, where they start.
+const ex_area_static: u8 = 1;
+const ex_area_speed: u8 = 6;
+const ex_area_brightness: u8 = 10;
+/// Gigabyte's software waits this long after each color area it sets.
+pub const ex_area_pause_ms: u32 = 120;
 
 pub const default_seconds: u8 = 4;
 /// Gigabyte's software offers 1 to 10 s per overlay field on the newer panel.
@@ -150,6 +160,50 @@ pub fn buildExValues(frame: *[frame_length]u8, values: Encoded) void {
     std.mem.writeInt(u16, frame[13..15], values.power, .big);
 }
 
+/// The color areas of the newer panel's built-in screens, Gigabyte's regions 101 to 105 in
+/// order: the artwork (the eagle of screen 1, the helmet of screen 2, the left head of screen
+/// 3), the label and the value of the readings, and the middle and right heads of screen 3.
+pub const ex_area_count = 5;
+const ExAreaRole = enum { logo, text };
+const ex_area_roles = [ex_area_count]ExAreaRole{ .logo, .text, .text, .logo, .logo };
+
+pub const ExAreaColor = struct { area: u8, color: Rgb };
+
+/// The areas of built-in screen `screen` to color, in area order: the readings in `text_color`,
+/// the artwork in `logo_color`. Null leaves those areas to the panel's own effect. Screens 1 and
+/// 2 have the first three areas and screen 3 all five; the other screens get none, as in
+/// Gigabyte's software.
+pub fn exAreaColors(buffer: *[ex_area_count]ExAreaColor, screen: Mode, text_color: ?Rgb, logo_color: ?Rgb) []const ExAreaColor {
+    const screen_areas: usize = switch (screen) {
+        .faith1, .faith2 => 3,
+        .faith3 => ex_area_count,
+        else => 0,
+    };
+    var count: usize = 0;
+    for (ex_area_roles[0..screen_areas], 0..) |role, area| {
+        const color = switch (role) {
+            .text => text_color,
+            .logo => logo_color,
+        } orelse continue;
+        buffer[count] = .{ .area = @intCast(area), .color = color };
+        count += 1;
+    }
+    return buffer[0..count];
+}
+
+/// A static color for one color area. rgbctrl never sends the LED save (`13 01`) or any other
+/// save, so the panel keeps the color only until it loses power.
+pub fn buildExAreaColor(frame: *[frame_length]u8, area: u8, color: Rgb) void {
+    beginEx(frame, ex_opcode_set_area);
+    frame[2] = ex_area_static;
+    frame[3] = ex_area_speed;
+    frame[4] = ex_area_brightness;
+    frame[5] = color.r;
+    frame[6] = color.g;
+    frame[7] = color.b;
+    frame[9] = area;
+}
+
 pub const ExVersion = struct { major: u8, minor: u8 };
 
 /// `10 01 <major> <minor>`; Gigabyte's software takes a zero major version as no panel.
@@ -180,13 +234,17 @@ pub fn classifyExProbe(result: sdk.nvapi.Exchange, reply: []const u8) ExProbe {
     return .unclear;
 }
 
-pub const ExSetupStep = enum { open, set_mode, overlay_switch, overlay };
+pub const ExSetupStep = enum { open, set_mode, overlay_switch, overlay, area_colors };
 
 /// The setup of the newer panel, in the order of Gigabyte's software. This panel cannot report
-/// its screen, so switching it on and changing the screen, which rgbctrl could not undo, happen
-/// only when a screen was asked for; the overlay alone is switched off again on close.
-pub fn exSetupSteps(change_screen: bool) []const ExSetupStep {
+/// its screen or its colors, so what rgbctrl could not undo happens only when asked for:
+/// switching it on and changing the screen when a screen was, and coloring areas when colors
+/// were. The colors go last, once the overlay's label and value exist. The overlay alone is
+/// switched off again on close.
+pub fn exSetupSteps(change_screen: bool, set_colors: bool) []const ExSetupStep {
+    if (change_screen and set_colors) return &.{ .open, .set_mode, .overlay_switch, .overlay, .area_colors };
     if (change_screen) return &.{ .open, .set_mode, .overlay_switch, .overlay };
+    if (set_colors) return &.{ .overlay_switch, .overlay, .area_colors };
     return &.{ .overlay_switch, .overlay };
 }
 
@@ -443,11 +501,41 @@ test "only a refusal, a missing reply or a zero version sends the probe on to th
     try std.testing.expectEqual(ExProbe.unclear, classifyExProbe(.busy, &.{ 0, 0, 0, 0 }));
 }
 
-test "the newer panel keeps its power and screen unless a screen was asked for" {
-    const overlay_only = exSetupSteps(false);
+test "the newer panel keeps its power, screen and colors unless they were asked for" {
+    const overlay_only = exSetupSteps(false, false);
     try std.testing.expectEqualSlices(ExSetupStep, &.{ .overlay_switch, .overlay }, overlay_only);
-    for (overlay_only) |step| try std.testing.expect(step != .open and step != .set_mode);
-    try std.testing.expectEqualSlices(ExSetupStep, &.{ .open, .set_mode, .overlay_switch, .overlay }, exSetupSteps(true));
+    for (overlay_only) |step| try std.testing.expect(step != .open and step != .set_mode and step != .area_colors);
+    try std.testing.expectEqualSlices(ExSetupStep, &.{ .open, .set_mode, .overlay_switch, .overlay }, exSetupSteps(true, false));
+    try std.testing.expectEqualSlices(ExSetupStep, &.{ .overlay_switch, .overlay, .area_colors }, exSetupSteps(false, true));
+    try std.testing.expectEqualSlices(ExSetupStep, &.{ .open, .set_mode, .overlay_switch, .overlay, .area_colors }, exSetupSteps(true, true));
+}
+
+test "newer panel color areas get a static color at the speed and brightness Gigabyte starts with" {
+    var frame = [_]u8{0xAA} ** frame_length;
+    buildExAreaColor(&frame, 1, .{ .r = 0xFF, .g = 0xFF, .b = 0xFF });
+    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x01, 0x01, 0x06, 0x0A, 0xFF, 0xFF, 0xFF, 0x00, 0x01 }, frame[0..10]);
+    try expectZeroTail(frame, 10);
+    buildExAreaColor(&frame, 0, .{ .r = 0, .g = 0, .b = 0 });
+    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x01, 0x01, 0x06, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00 }, frame[0..10]);
+    try expectZeroTail(frame, 10);
+}
+
+test "only the color areas of the chosen screen that were asked for get a color" {
+    const white = Rgb{ .r = 0xFF, .g = 0xFF, .b = 0xFF };
+    const black = Rgb{ .r = 0, .g = 0, .b = 0 };
+    var buffer: [ex_area_count]ExAreaColor = undefined;
+    try std.testing.expectEqual(@as(usize, 0), exAreaColors(&buffer, .faith1, null, null).len);
+    try std.testing.expectEqualSlices(ExAreaColor, &.{ .{ .area = 1, .color = white }, .{ .area = 2, .color = white } }, exAreaColors(&buffer, .faith1, white, null));
+    try std.testing.expectEqualSlices(ExAreaColor, &.{ .{ .area = 0, .color = black }, .{ .area = 1, .color = white }, .{ .area = 2, .color = white } }, exAreaColors(&buffer, .faith2, white, black));
+    try std.testing.expectEqualSlices(ExAreaColor, &.{ .{ .area = 0, .color = black }, .{ .area = 3, .color = black }, .{ .area = 4, .color = black } }, exAreaColors(&buffer, .faith3, null, black));
+    try std.testing.expectEqualSlices(ExAreaColor, &.{
+        .{ .area = 0, .color = black },
+        .{ .area = 1, .color = white },
+        .{ .area = 2, .color = white },
+        .{ .area = 3, .color = black },
+        .{ .area = 4, .color = black },
+    }, exAreaColors(&buffer, .faith3, white, black));
+    try std.testing.expectEqual(@as(usize, 0), exAreaColors(&buffer, .chibi, white, black).len);
 }
 
 test "metric names map to overlay flags and only the supported cards match" {
