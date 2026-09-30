@@ -210,20 +210,23 @@ either file:
 - `lcd_seconds` is 1 to 60, but the newer controller shows a reading at most 10 s.
 - On the newer controller, the built-in screens draw the readings and the artwork beside them
   (the eagle of screen 1, the helmet of screen 2, the three heads of screen 3) in colors of
-  their own, a rainbow wave on the tested card. On the screen that `lcd_screen` picks,
-  `lcd_color` (`"#RRGGBB"`) sets the readings to a static color and `lcd_logo_color` the
-  artwork; black should hide the artwork. Without them the panel keeps its colors, which
-  rgbctrl cannot read back. The overlay on other screens also takes `lcd_color`, and is white
-  without it. The older controller ignores both keys. For white readings without artwork on
-  screen 1:
+  their own, a rainbow wave on the tested card, over a white background that no command
+  changes. On the screen that `lcd_screen` picks, `lcd_color` (`"#RRGGBB"`) sets the readings
+  to a static color and `lcd_logo_color` the artwork, which the background color should hide.
+  Without them the panel keeps its colors, which rgbctrl cannot read back. The overlay on
+  other screens also takes `lcd_color`, and is white without it. The older controller ignores
+  both keys. For black readings without artwork on screen 1:
 
   ```json
   {
     "plugins": {
-      "gigabyte_gpu": { "lcd_screen": 1, "lcd_color": "#FFFFFF", "lcd_logo_color": "#000000" }
+      "gigabyte_gpu": { "lcd_screen": 1, "lcd_color": "#000000", "lcd_logo_color": "#FFFFFF" }
     }
   }
   ```
+
+  A black background would take a custom picture uploaded into the panel's flash, which
+  rgbctrl does not do.
 
 - The panel shows only what rgbctrl sends. When rgbctrl stops feeding it (`rgbctrl stop`, or a
   config change that turns `lcd` or `lcd_readout` off or reloads the plugin), the overlay goes.
