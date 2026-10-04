@@ -10,7 +10,7 @@ either once (`apply`) or resident (`run`, for example as a SYSTEM scheduled task
 - Every device family is a separate DLL in `plugins\` that implements the C ABI in
   `include\rgbctrl_plugin.h`. Anyone can add hardware by writing another DLL, in Zig with the
   SDK in `sdk\` or in C (see `examples\c_plugin\virtual_led.c` and `docs\plugin-abi.md`).
-- Written in Zig 0.16.0 against the Win32 API directly; no runtime dependencies besides
+- Written in Zig 0.17.0 against the Win32 API directly; no runtime dependencies besides
   Windows itself (and the PawnIO driver for the features that need it).
 
 Status: all protocol code is unit tested with byte vectors taken from the protocol research,
@@ -35,7 +35,7 @@ plugin sends during discovery, and known conflicts.
 
 ## Build
 
-1. Install Zig 0.16.0 (`winget install zig.zig`).
+1. Install Zig 0.17.0 (`winget install zig.zig --version 0.17.0`).
 2. `zig build --release` builds everything into `zig-out\`:
    - `bin\rgbctrl.exe`, `bin\plugins\*.dll`, `bin\rgbctrl.example.json`
    - `bin\pawnio\AMDFamily17.bin` and `bin\pawnio\SmbusPIIX4.bin` (downloaded once from the

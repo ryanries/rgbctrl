@@ -1,8 +1,7 @@
 const std = @import("std");
 const abi = @import("abi.zig");
-const c = @cImport({
-    @cInclude("rgbctrl_plugin.h");
-});
+// include/rgbctrl_plugin.h, translated by the build (see abi_c_module in build.zig).
+const c = @import("rgbctrl_plugin_h");
 
 fn expectSameLayout(comptime Zig: type, comptime C: type, comptime fields: []const []const u8) !void {
     try std.testing.expectEqual(@sizeOf(C), @sizeOf(Zig));

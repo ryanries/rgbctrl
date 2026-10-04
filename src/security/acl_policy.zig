@@ -47,7 +47,7 @@ const system_sid = [_]u8{ 1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0 };
 const administrators_sid = [_]u8{ 1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 0x02, 0, 0 };
 const owner_rights_sid = [_]u8{ 1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0 };
 const trusted_installer_sid = blk: {
-    var bytes = [_]u8{ 1, 6, 0, 0, 0, 0, 0, 5, 80, 0, 0, 0 } ++ [_]u8{0} ** 20;
+    var bytes = [_]u8{ 1, 6, 0, 0, 0, 0, 0, 5, 80, 0, 0, 0 } ++ @as([20]u8, @splat(0));
     const parts = [_]u32{ 956008885, 3418522649, 1831038044, 1853292631, 2271478464 };
     for (parts, 0..) |part, index| std.mem.writeInt(u32, bytes[12 + index * 4 ..][0..4], part, .little);
     break :blk bytes;

@@ -56,11 +56,11 @@ pub const Module = struct {
 
     pub fn execute(self: *Module, name: []const u8, input: []const u64, output: []u64) ExecuteError!void {
         if (name.len >= function_name_bytes or input.len > max_cells or output.len > max_cells) return error.BadArgument;
-        var request: [4 + max_cells]u64 = [_]u64{0} ** (4 + max_cells);
+        var request: [4 + max_cells]u64 = @splat(0);
         const name_bytes = std.mem.sliceAsBytes(request[0..4]);
         @memcpy(name_bytes[0..name.len], name);
         @memcpy(request[4 .. 4 + input.len], input);
-        var response: [max_cells]u64 = [_]u64{0} ** max_cells;
+        var response: [max_cells]u64 = @splat(0);
         var status_block: win32.IO_STATUS_BLOCK = .{};
         const in_bytes: u32 = @intCast((4 + input.len) * 8);
         const out_bytes: u32 = @intCast(output.len * 8);

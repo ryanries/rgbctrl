@@ -163,7 +163,7 @@ test "ids are 1 to 31 bytes of lowercase letters, digits and underscores" {
     try testing.expect(!isValidId(""));
     try testing.expect(!isValidId("Keyboard"));
     try testing.expect(!isValidId("a.b"));
-    try testing.expect(!isValidId("a" ** 32));
+    try testing.expect(!isValidId(&@as([32]u8, @splat('a'))));
 }
 
 test "copyDevice clamps LED counts, copies positions and strips unsupported capabilities" {

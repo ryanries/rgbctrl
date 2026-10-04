@@ -246,7 +246,7 @@ fn parseCalibration(bytes: []const u8) ParseError!Calibration {
         return .{ .enabled = false, .order = .{ .positions = .{ 0, 1, 2 } } };
     }
     if (bytes[3] != 0) return error.InvalidCalibration;
-    var seen = [_]bool{false} ** 3;
+    var seen: [3]bool = @splat(false);
     var positions: [3]u8 = undefined;
     for (bytes[0..3], 0..) |position, index| {
         if (position > 2 or seen[position]) return error.InvalidCalibration;
@@ -262,7 +262,7 @@ pub fn parseIdentification(info_response: []const u8, extended_response: []const
     if (info_response[1] != 0x01) return error.InvalidProduct;
     if (extended_response[1] != 0 or extended_response[2] != 0 or extended_response[3] != 0) return error.InvalidExtendedHeader;
     var result = Identification{
-        .firmware = [_]u8{0} ** 28,
+        .firmware = @splat(0),
         .firmware_len = 0,
         .firmware_version = info_response[4..8].*,
         .led_count_class_shadow = .{ info_response[8], info_response[9], info_response[10] },
@@ -303,8 +303,8 @@ test "calibration parser disables all zero words and rejects malformed words" {
 }
 
 test "identification parser extracts firmware classes flags and all zone calibrations" {
-    var info = [_]u8{0} ** report_length;
-    var extended = [_]u8{0} ** report_length;
+    var info: [report_length]u8 = @splat(0);
+    var extended: [report_length]u8 = @splat(0);
     info[0] = report_id;
     info[1] = 1;
     @memcpy(info[4..8], &[_]u8{ 0x04, 0x03, 0x02, 0x01 });
@@ -331,8 +331,8 @@ test "identification parser extracts firmware classes flags and all zone calibra
 }
 
 test "identification parser rejects invalid replies" {
-    var info = [_]u8{0} ** report_length;
-    var extended = [_]u8{0} ** report_length;
+    var info: [report_length]u8 = @splat(0);
+    var extended: [report_length]u8 = @splat(0);
     info[0] = report_id;
     info[1] = 1;
     extended[0] = report_id;
@@ -397,7 +397,7 @@ test "slot clear covers every zone slot and sends an empty effect with no zones"
         try std.testing.expect((all_zones_mask & zone_spec.apply_mask) == zone_spec.apply_mask);
     }
     try std.testing.expectEqualSlices(u8, &.{ 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x90, 0x91, 0x92 }, &effect_slots);
-    var packet = [_]u8{0xAA} ** report_length;
+    var packet: [report_length]u8 = @splat(0xAA);
     buildSlotClear(&packet, 0x22);
     try std.testing.expectEqualSlices(u8, &.{ report_id, 0x22 }, packet[0..2]);
     try expectZeroTail(packet, 2);

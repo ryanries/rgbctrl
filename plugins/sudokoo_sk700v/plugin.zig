@@ -65,7 +65,7 @@ const Instance = struct {
     power_bar_max_watts: u16 = protocol.default_power_bar_max_watts,
     blank_on_exit: bool = true,
     exclusive: bool = true,
-    sensors: [sensor_keys.len]SensorSlot = [_]SensorSlot{.{}} ** sensor_keys.len,
+    sensors: [sensor_keys.len]SensorSlot = @splat(.{}),
     open_frame_pending: bool = true,
     device_info: abi.DeviceInfo = .{ .zone_count = 0, .id = device_id, .name = "Sudokoo SK700V display", .zones = null },
 

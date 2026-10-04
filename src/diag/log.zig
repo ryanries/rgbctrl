@@ -27,7 +27,7 @@ extern "kernel32" fn CopyFileW(existing: [*:0]const u16, new: [*:0]const u16, fa
 pub const Logger = struct {
     lock: win32.SRWLOCK = .{},
     file: ?win32.HANDLE = null,
-    path_buffer: [path_capacity]u16 = [_]u16{0} ** path_capacity,
+    path_buffer: [path_capacity]u16 = @splat(0),
     path_len: usize = 0,
     level: Level = .debug,
     max_bytes: u64 = 1024 * 1024,
@@ -372,8 +372,8 @@ test "formatLine writes the documented layout and neutralizes control characters
 
 test "formatLine truncates long messages to the buffer" {
     var buffer: [80]u8 = undefined;
-    const long = "x" ** 200;
-    const line = formatLine(&buffer, .info, "host", long, .{ .year = 2025, .month = 1, .day = 1, .hour = 0, .minute = 0, .second = 0, .millisecond = 0 });
+    const long: [200]u8 = @splat('x');
+    const line = formatLine(&buffer, .info, "host", &long, .{ .year = 2025, .month = 1, .day = 1, .hour = 0, .minute = 0, .second = 0, .millisecond = 0 });
     try std.testing.expectEqual(@as(usize, 80), line.len);
     try std.testing.expect(std.mem.endsWith(u8, line, "x\r\n"));
 }
@@ -410,7 +410,7 @@ test "the log rotates to name.1 at the size limit and keeps writing to a fresh f
     var logger = Logger{};
     try logger.open(directory, "rgbctrl_rotation_test.log");
     logger.max_bytes = 200;
-    logger.write(.info, "test", "first line that fills most of the budget " ++ "x" ** 100);
+    logger.write(.info, "test", "first line that fills most of the budget " ++ @as([100]u8, @splat('x')));
     logger.write(.info, "test", "second line after rotation");
     logger.write(.debug, "test", "third line");
     logger.close();
@@ -441,11 +441,11 @@ test "a failed rotation is reported once and the log is bounded at twice the siz
     var logger = Logger{};
     try logger.open(directory, "rgbctrl_locked_rotation.log");
     logger.max_bytes = 300;
-    logger.write(.info, "test", "line one " ++ "y" ** 120);
+    logger.write(.info, "test", "line one " ++ @as([120]u8, @splat('y')));
     logger.write(.info, "test", "line two");
-    logger.write(.info, "test", "line three " ++ "z" ** 100);
+    logger.write(.info, "test", "line three " ++ @as([100]u8, @splat('z')));
     logger.write(.info, "test", "line four");
-    logger.write(.info, "test", "line five " ++ "w" ** 80);
+    logger.write(.info, "test", "line five " ++ @as([80]u8, @splat('w')));
     logger.close();
     const content = try readWhole(path);
     defer std.testing.allocator.free(content);
@@ -475,9 +475,9 @@ test "a rotation whose rename is blocked by a reader copies the log to name.1 be
     try std.testing.expect(win32.isValid(reader));
     defer _ = win32.CloseHandle(reader);
     logger.max_bytes = 300;
-    logger.write(.info, "test", "line one " ++ "y" ** 120);
+    logger.write(.info, "test", "line one " ++ @as([120]u8, @splat('y')));
     logger.write(.info, "test", "line two");
-    logger.write(.info, "test", "line three " ++ "z" ** 100);
+    logger.write(.info, "test", "line three " ++ @as([100]u8, @splat('z')));
     logger.max_bytes = 1000;
     logger.write(.info, "test", "line four");
     logger.close();

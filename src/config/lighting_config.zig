@@ -474,7 +474,11 @@ test "invalid values make the zone a config error with the JSON path" {
     const bad_color = try context.lighting("{\"lighting\": {\"*\": {\"*\": {\"effect\": \"static\", \"colors\": [\"#FF0000\", \"red\"]}}}}");
     try testing.expect(try context.resolveZone(bad_color, "d", "z", strip_shape) == .invalid);
     try testing.expect(context.diagnostics.contains("lighting.*.*.colors[1]: must be a color string"));
-    const too_many = try context.lighting("{\"lighting\": {\"d\": {\"z\": {\"effect\": \"gradient\", \"colors\": [" ++ ("\"#000000\"," ** 17) ++ "]}}}}");
+    const seventeen_colors: *const [17 * 10]u8 = comptime colors: {
+        const colors: [17][10]u8 = @splat("\"#000000\",".*);
+        break :colors @ptrCast(&colors);
+    };
+    const too_many = try context.lighting("{\"lighting\": {\"d\": {\"z\": {\"effect\": \"gradient\", \"colors\": [" ++ seventeen_colors ++ "]}}}}");
     try testing.expect(try context.resolveZone(too_many, "d", "z", strip_shape) == .invalid);
     const empty = try context.lighting("{\"lighting\": {\"d\": {\"z\": {\"effect\": \"static\", \"colors\": []}}}}");
     try testing.expect(try context.resolveZone(empty, "d", "z", strip_shape) == .invalid);

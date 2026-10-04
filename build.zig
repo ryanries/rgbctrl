@@ -21,9 +21,9 @@ const c_plugin_variants = [_]struct { name: []const u8, define: ?[]const u8 }{
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{ .default_target = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu } });
-    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSmall });
-    const strip = optimize != .Debug;
-    const bundle_compiler_rt = optimize == .Debug;
+    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .small });
+    const strip = optimize != .debug;
+    const bundle_compiler_rt = optimize == .debug;
     const install_pawnio_modules = b.option(bool, "pawnio-modules", "Install the PawnIO modules from the pinned official release (default true)") orelse true;
 
     const rt = b.createModule(.{
@@ -36,7 +36,7 @@ pub fn build(b: *std.Build) void {
 
     const sdk_host = b.createModule(.{ .root_source_file = b.path("sdk/sdk.zig"), .target = target, .optimize = optimize, .strip = strip });
     const sdk_plugin = b.createModule(.{ .root_source_file = b.path("sdk/sdk.zig"), .target = target, .optimize = optimize, .strip = strip, .single_threaded = true });
-    const sdk_test = b.createModule(.{ .root_source_file = b.path("sdk/sdk.zig"), .target = target, .optimize = .Debug });
+    const sdk_test = b.createModule(.{ .root_source_file = b.path("sdk/sdk.zig"), .target = target, .optimize = .debug });
 
     const host = b.createModule(.{ .root_source_file = b.path("src/main.zig"), .target = target, .optimize = optimize, .strip = strip });
     host.addImport("sdk", sdk_host);
@@ -50,7 +50,7 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run all unit tests");
 
-    const host_tests_module = b.createModule(.{ .root_source_file = b.path("src/host_tests.zig"), .target = target, .optimize = .Debug });
+    const host_tests_module = b.createModule(.{ .root_source_file = b.path("src/host_tests.zig"), .target = target, .optimize = .debug });
     host_tests_module.addImport("sdk", sdk_test);
     host_tests_module.addAnonymousImport("example_config", .{ .root_source_file = b.path("rgbctrl.example.json") });
     const host_tests = b.addTest(.{ .name = "host-tests", .root_module = host_tests_module });
@@ -62,8 +62,16 @@ pub fn build(b: *std.Build) void {
     const run_sdk_tests = b.addRunArtifact(sdk_tests);
     test_step.dependOn(&run_sdk_tests.step);
 
-    const abi_c_module = b.createModule(.{ .root_source_file = b.path("sdk/abi_c_test.zig"), .target = target, .optimize = .Debug });
-    abi_c_module.addIncludePath(b.path("include"));
+    // The C header, translated so the test can compare it with the Zig ABI mirror. Its only
+    // includes, <stddef.h> and <stdint.h>, come with Zig's C headers, so no libc is linked.
+    const plugin_header = b.addTranslateC(.{
+        .root_source_file = b.path("include/rgbctrl_plugin.h"),
+        .target = target,
+        .optimize = .debug,
+        .link_libc = false,
+    });
+    const abi_c_module = b.createModule(.{ .root_source_file = b.path("sdk/abi_c_test.zig"), .target = target, .optimize = .debug });
+    abi_c_module.addImport("rgbctrl_plugin_h", plugin_header.createModule());
     const abi_c_tests = b.addTest(.{ .name = "abi-c-tests", .root_module = abi_c_module });
     const run_abi_c_tests = b.addRunArtifact(abi_c_tests);
     test_step.dependOn(&run_abi_c_tests.step);
@@ -84,7 +92,7 @@ pub fn build(b: *std.Build) void {
         b.getInstallStep().dependOn(&install.step);
         b.step(b.fmt("plugin-{s}", .{name}), b.fmt("Build the {s} plugin only", .{name})).dependOn(&install.step);
 
-        const test_module = b.createModule(.{ .root_source_file = source, .target = target, .optimize = .Debug });
+        const test_module = b.createModule(.{ .root_source_file = source, .target = target, .optimize = .debug });
         test_module.addImport("sdk", sdk_test);
         const tests = b.addTest(.{ .name = b.fmt("{s}-tests", .{name}), .root_module = test_module });
         const run_tests = b.addRunArtifact(tests);

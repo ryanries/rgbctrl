@@ -391,7 +391,7 @@ fn expectZeroTail(frame: [frame_length]u8, start: usize) !void {
 }
 
 test "commands are 256-byte frames with the opcode, the magic and zero padding" {
-    var frame = [_]u8{0xAA} ** frame_length;
+    var frame: [frame_length]u8 = @splat(0xAA);
     buildReadFirmware(&frame);
     try std.testing.expectEqualSlices(u8, &.{ 0xD6, 0xCB, 0x55, 0xAC, 0x38 }, frame[0..5]);
     try expectZeroTail(frame, 5);
@@ -426,7 +426,7 @@ test "overlay frame has one byte per metric then the rotation interval" {
     try std.testing.expectEqualSlices(u8, &.{ 0xE1, 0xCB, 0x55, 0xAC, 0x38, 1, 0, 1, 1, 0, 0, 0, 1, 4 }, frame[0..14]);
     try expectZeroTail(frame, 14);
     buildOverlay(&frame, 0, 0);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 9), frame[5..14]);
+    try std.testing.expectEqualSlices(u8, &@as([9]u8, @splat(0)), frame[5..14]);
 }
 
 test "values frame packs 16-bit fields big-endian and leaves fps at zero" {
@@ -449,7 +449,7 @@ test "replies decode the firmware version, the display mode and the panel power"
 }
 
 test "newer panel commands are 256-byte frames with the opcode, 01 and zero padding" {
-    var frame = [_]u8{0xAA} ** frame_length;
+    var frame: [frame_length]u8 = @splat(0xAA);
     buildExOpen(&frame, true);
     try std.testing.expectEqualSlices(u8, &.{ 0x15, 0x01, 0x01 }, frame[0..3]);
     try expectZeroTail(frame, 3);
@@ -469,14 +469,14 @@ test "newer panel commands are 256-byte frames with the opcode, 01 and zero padd
 }
 
 test "newer panel overlay carries the field bits, the seconds and the text color" {
-    var frame = [_]u8{0xAA} ** frame_length;
+    var frame: [frame_length]u8 = @splat(0xAA);
     buildExOverlay(&frame, default_metrics, 4, .{ .r = 0x12, .g = 0x34, .b = 0x56 });
     try std.testing.expectEqualSlices(u8, &.{ 0x17, 0x01, 0x01, 0x8D, 0x04, 0x12, 0x34, 0x56 }, frame[0..8]);
     try expectZeroTail(frame, 8);
 }
 
 test "newer panel values match the packet of Gigabyte's service, fps left at zero" {
-    var frame = [_]u8{0xAA} ** frame_length;
+    var frame: [frame_length]u8 = @splat(0xAA);
     buildExValues(&frame, .{ .temp = 55, .clock = 2400, .load = 37, .fan = 1200, .vram_clock = 15000, .vram = 20, .power = 250 });
     try std.testing.expectEqualSlices(u8, &.{ 0x23, 0x01, 0x37, 0x09, 0x60, 0x25, 0x04, 0xB0, 0x3A, 0x98, 0x14, 0x00, 0x00, 0x00, 0xFA }, frame[0..15]);
     try expectZeroTail(frame, 15);
@@ -511,7 +511,7 @@ test "the newer panel keeps its power, screen and colors unless they were asked 
 }
 
 test "newer panel color areas get a static color at the speed and brightness Gigabyte starts with" {
-    var frame = [_]u8{0xAA} ** frame_length;
+    var frame: [frame_length]u8 = @splat(0xAA);
     buildExAreaColor(&frame, 1, .{ .r = 0xFF, .g = 0xFF, .b = 0xFF });
     try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x01, 0x01, 0x06, 0x0A, 0xFF, 0xFF, 0xFF, 0x00, 0x01 }, frame[0..10]);
     try expectZeroTail(frame, 10);

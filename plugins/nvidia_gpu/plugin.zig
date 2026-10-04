@@ -63,7 +63,7 @@ const Instance = struct {
     api: ?Api = null,
     device: ?NvmlDevice = null,
     fan_count: u32 = 1,
-    failed: [sensor_names.len]bool = [_]bool{false} ** sensor_names.len,
+    failed: [sensor_names.len]bool = @splat(false),
 
     fn load(self: *Instance) void {
         const module = win32.LoadLibraryExW(win32.L("nvml.dll"), null, win32.LOAD_LIBRARY_SEARCH_SYSTEM32) orelse {
@@ -108,7 +108,7 @@ const Instance = struct {
             if (get_fan_count(device.?, &count) == nvml_success and count > 0) self.fan_count = @min(count, max_fans);
         }
         if (symbol(NameFn, module, "nvmlDeviceGetName")) |get_name| {
-            var name = [_]u8{0} ** 96;
+            var name: [96]u8 = @splat(0);
             if (get_name(device.?, &name, name.len) == nvml_success) self.host.debug("reading the sensors of {s} ({d} fans)", .{ std.mem.sliceTo(&name, 0), self.fan_count });
         }
     }
@@ -266,7 +266,7 @@ test "VRAM load is the used share of the total and unknown without a total" {
 }
 
 test "sensor names are the standard gpu names in enum order" {
-    try std.testing.expectEqual(@as(usize, @typeInfo(Sensor).@"enum".fields.len), sensor_names.len);
+    try std.testing.expectEqual(@as(usize, @typeInfo(Sensor).@"enum".field_names.len), sensor_names.len);
     try std.testing.expectEqualStrings("gpu.fan", sensor_names[@intFromEnum(Sensor.fan)]);
     try std.testing.expectEqualStrings("gpu.mem.load", sensor_names[@intFromEnum(Sensor.mem_load)]);
 }

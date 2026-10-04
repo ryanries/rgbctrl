@@ -107,7 +107,7 @@ pub const RTL_OSVERSIONINFOW = extern struct {
     dwMinorVersion: u32 = 0,
     dwBuildNumber: u32 = 0,
     dwPlatformId: u32 = 0,
-    szCSDVersion: [128]u16 = [_]u16{0} ** 128,
+    szCSDVersion: [128]u16 = @splat(0),
 };
 
 pub const IO_STATUS_BLOCK = extern struct {

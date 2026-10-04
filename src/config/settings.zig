@@ -250,8 +250,8 @@ test "log file names follow the strict grammar and never name a device" {
     try testing.expect(!isValidLogFileName("nul.log"));
     try testing.expect(!isValidLogFileName("COM1.log"));
     try testing.expect(!isValidLogFileName("C:x.log"));
-    try testing.expect(isValidLogFileName("a" ** 59 ++ ".log"));
-    try testing.expect(!isValidLogFileName("a" ** 60 ++ ".log"));
+    try testing.expect(isValidLogFileName(@as([59]u8, @splat('a')) ++ ".log"));
+    try testing.expect(!isValidLogFileName(@as([60]u8, @splat('a')) ++ ".log"));
 }
 
 test "plugin hashes ignore enabled and persist but see every other key" {

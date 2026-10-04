@@ -166,7 +166,7 @@ pub fn parseLegacyProbe(response: []const u8) bool {
 }
 
 pub fn buildBlackwellProbe10() [blackwell_packet_length]u8 {
-    var packet: [blackwell_packet_length]u8 = [_]u8{0} ** blackwell_packet_length;
+    var packet: [blackwell_packet_length]u8 = @splat(0);
     packet[0] = 0x10;
     packet[1] = 0x01;
     return packet;
@@ -178,7 +178,7 @@ pub fn parseBlackwellProbe10(response: []const u8) bool {
 }
 
 pub fn buildBlackwellSubsystemProbe() [blackwell_packet_length]u8 {
-    var packet: [blackwell_packet_length]u8 = [_]u8{0} ** blackwell_packet_length;
+    var packet: [blackwell_packet_length]u8 = @splat(0);
     packet[0] = 0x11;
     packet[1] = 0x01;
     return packet;
@@ -266,7 +266,7 @@ pub fn buildLegacyPersistPacket() [legacy_packet_length]u8 {
 }
 
 fn buildBlackwellPacket(command: u8, zone: u8, mode: u8, speed: u32, brightness: u32, colors: []const abi.Rgb, led_count: u8) [blackwell_packet_length]u8 {
-    var packet: [blackwell_packet_length]u8 = [_]u8{0} ** blackwell_packet_length;
+    var packet: [blackwell_packet_length]u8 = @splat(0);
     const first = colorAt(colors, 0);
     const count: u8 = @min(led_count, @as(u8, @intCast(@min(colors.len, max_led_count))));
     packet[0] = command;
@@ -307,7 +307,7 @@ pub fn buildBlackwellHostPacket(zone: u8, colors: []const abi.Rgb, led_count: u8
 }
 
 pub fn buildBlackwellPersistPacket() [blackwell_packet_length]u8 {
-    var packet: [blackwell_packet_length]u8 = [_]u8{0} ** blackwell_packet_length;
+    var packet: [blackwell_packet_length]u8 = @splat(0);
     packet[0] = 0x13;
     packet[1] = 0x01;
     return packet;
@@ -397,7 +397,8 @@ test "blackwell hardware packet maps effects and uses master 5080 offset eleven"
     try std.testing.expectEqualSlices(u8, &.{ 0x11, 0x22, 0x33 }, packet[5..8]);
     try std.testing.expectEqual(@as(u8, 2), packet[9]);
     try std.testing.expectEqual(@as(u8, 8), packet[10]);
-    try std.testing.expectEqualSlices(u8, &([_]u8{ 0x11, 0x22, 0x33 } ** 8), packet[11..35]);
+    const every_led_color: [8][3]u8 = @splat(.{ 0x11, 0x22, 0x33 });
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&every_led_color), packet[11..35]);
     try std.testing.expectEqual(@as(?[blackwell_packet_length]u8, null), buildBlackwellHardwarePacket(0, .gradient, 50, 100, color, 8));
 }
 
@@ -406,7 +407,8 @@ test "blackwell hardware effect fills every led in the zone" {
     // An eight-LED fan ring must be addressed as eight LEDs, not just the first.
     const fan = buildBlackwellHardwarePacket(0, .static, 50, 100, color, 8).?;
     try std.testing.expectEqual(@as(u8, 8), fan[10]);
-    try std.testing.expectEqualSlices(u8, &([_]u8{ 0x0A, 0x0B, 0x0C } ** 8), fan[11..35]);
+    const every_led_color: [8][3]u8 = @splat(.{ 0x0A, 0x0B, 0x0C });
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&every_led_color), fan[11..35]);
     // A single-LED logo stays a single LED.
     const logo = buildBlackwellHardwarePacket(3, .static, 50, 100, color, 1).?;
     try std.testing.expectEqual(@as(u8, 1), logo[10]);
@@ -414,7 +416,7 @@ test "blackwell hardware effect fills every led in the zone" {
     // Off blacks out every LED and ignores the requested color.
     const off = buildBlackwellHardwarePacket(0, .off, 50, 100, color, 8).?;
     try std.testing.expectEqual(@as(u8, 8), off[10]);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 24), off[11..35]);
+    try std.testing.expectEqualSlices(u8, &@as([24]u8, @splat(0)), off[11..35]);
 }
 
 test "blackwell host packet carries per led colors and persist packet is padded" {

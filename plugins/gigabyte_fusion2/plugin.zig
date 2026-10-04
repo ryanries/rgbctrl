@@ -79,19 +79,19 @@ const Instance = struct {
     calibrations: [protocol.zone_count]protocol.Calibration = undefined,
     feature_flags: u8 = 0,
     led_count_class_shadow: [3]u8 = .{ 0, 0, 0 },
-    firmware: [28]u8 = [_]u8{0} ** 28,
+    firmware: [28]u8 = @splat(0),
     firmware_len: usize = 0,
-    argb_led_counts: [protocol.argb_zone_count]u32 = [_]u32{0} ** protocol.argb_zone_count,
-    argb_resized: [protocol.argb_zone_count]bool = [_]bool{false} ** protocol.argb_zone_count,
+    argb_led_counts: [protocol.argb_zone_count]u32 = @splat(0),
+    argb_resized: [protocol.argb_zone_count]bool = @splat(false),
     desired_argb: [protocol.argb_zone_count][protocol.max_argb_leds]abi.Rgb = undefined,
     sent_argb: [protocol.argb_zone_count][protocol.max_argb_leds]abi.Rgb = undefined,
-    argb_dirty: [protocol.argb_zone_count]bool = [_]bool{false} ** protocol.argb_zone_count,
-    argb_sent_valid: [protocol.argb_zone_count]bool = [_]bool{false} ** protocol.argb_zone_count,
-    desired_one_led: [protocol.one_led_zone_count]abi.Rgb = [_]abi.Rgb{abi.Rgb.black} ** protocol.one_led_zone_count,
-    sent_one_led: [protocol.one_led_zone_count]abi.Rgb = [_]abi.Rgb{abi.Rgb.black} ** protocol.one_led_zone_count,
-    one_led_dirty: [protocol.one_led_zone_count]bool = [_]bool{false} ** protocol.one_led_zone_count,
-    one_led_sent_valid: [protocol.one_led_zone_count]bool = [_]bool{false} ** protocol.one_led_zone_count,
-    one_led_last_write_ms: [protocol.one_led_zone_count]u64 = [_]u64{0} ** protocol.one_led_zone_count,
+    argb_dirty: [protocol.argb_zone_count]bool = @splat(false),
+    argb_sent_valid: [protocol.argb_zone_count]bool = @splat(false),
+    desired_one_led: [protocol.one_led_zone_count]abi.Rgb = @splat(abi.Rgb.black),
+    sent_one_led: [protocol.one_led_zone_count]abi.Rgb = @splat(abi.Rgb.black),
+    one_led_dirty: [protocol.one_led_zone_count]bool = @splat(false),
+    one_led_sent_valid: [protocol.one_led_zone_count]bool = @splat(false),
+    one_led_last_write_ms: [protocol.one_led_zone_count]u64 = @splat(0),
     host_stream_mask: u8 = 0,
     pending_direct_mask: bool = false,
     first_write_init_pending: bool = true,
@@ -99,7 +99,7 @@ const Instance = struct {
     // See WriteGate; while it holds, effects and frames are kept and sent by tick.
     gate: WriteGate = .{ .delay_ms = 0 },
     held_any: bool = false,
-    held_effects: [protocol.zone_count]?HeldEffect = [_]?HeldEffect{null} ** protocol.zone_count,
+    held_effects: [protocol.zone_count]?HeldEffect = @splat(null),
     // `apply` cannot hold writes for later, so right after Windows started it refuses them.
     refuse_early_apply: bool = false,
     wake_time_unknown: bool = false,
@@ -134,7 +134,7 @@ const Instance = struct {
         if (!self.held_any or self.gate.holding(now_ms)) return abi.status_ok;
         const held_effects = self.held_effects;
         self.held_any = false;
-        self.held_effects = [_]?HeldEffect{null} ** protocol.zone_count;
+        self.held_effects = @splat(null);
         // A board that is gone now gets every zone again from the host once it is back.
         if (!self.present or self.device == null) return abi.status_ok;
         self.host.info("sending the motherboard lighting held back until now", .{});

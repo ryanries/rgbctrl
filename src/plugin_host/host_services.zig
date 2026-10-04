@@ -24,7 +24,7 @@ pub const Context = struct {
     lock: win32.SRWLOCK = .{},
     last_problem: [240]u8 = undefined,
     last_problem_len: usize = 0,
-    warned_sensors: [warned_capacity]u64 = [_]u64{0} ** warned_capacity,
+    warned_sensors: [warned_capacity]u64 = @splat(0),
     warned_count: usize = 0,
 
     pub fn init(self: *Context, shared: *Shared, plugin_index: u16, plugin_name: []const u8, host_dir: [*:0]const u16, mode: u32) void {

@@ -177,7 +177,7 @@ pub const Supervisor = struct {
     }
 
     fn collectReports(self: *Supervisor) void {
-        var changed: [64]bool = [_]bool{false} ** 64;
+        var changed: [64]bool = @splat(false);
         var any_changed = false;
         for (self.workers, 0..) |*worker, index| {
             const report = worker.takeReport();

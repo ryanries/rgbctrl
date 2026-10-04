@@ -154,7 +154,7 @@ pub fn buildA8(report: *[report_length]u8, subcommand: u8, arguments: []const u8
 }
 
 pub fn buildLedRowRequest(report: *[report_length]u8, row: u8) void {
-    var arguments = [_]u8{0xFF} ** (payload_length - 2);
+    var arguments: [payload_length - 2]u8 = @splat(0xFF);
     arguments[0] = row;
     buildA8(report, 0x06, &arguments);
 }
@@ -264,9 +264,9 @@ pub const LedMap = struct {
 
 pub const LedMapBuilder = struct {
     led_count: u16,
-    firmware_by_position: [max_leds]u8 = [_]u8{0} ** max_leds,
-    columns: [max_leds]u8 = [_]u8{0} ** max_leds,
-    seen: [max_leds]bool = [_]bool{false} ** max_leds,
+    firmware_by_position: [max_leds]u8 = @splat(0),
+    columns: [max_leds]u8 = @splat(0),
+    seen: [max_leds]bool = @splat(false),
     position: u16 = 0,
     max_column: u8 = 0,
 
@@ -294,7 +294,7 @@ pub const LedMapBuilder = struct {
         var map = LedMap{
             .led_count = self.led_count,
             .firmware_by_position = self.firmware_by_position,
-            .led_x = [_]u16{0} ** max_leds,
+            .led_x = @splat(0),
         };
         for (0..self.led_count) |index| {
             map.led_x[index] = if (self.max_column == 0) 0 else @intCast(@as(u32, self.columns[index]) * 65535 / self.max_column);
@@ -385,7 +385,7 @@ test "packet builders produce exact raw HID reports" {
     try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x09, 0x03 }, report[0..3]);
     buildLedRowRequest(&report, 5);
     try std.testing.expectEqualSlices(u8, &.{ 0x00, 0xA8, 0x06, 0x05 }, report[0..4]);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0xFF} ** (payload_length - 3)), report[4..]);
+    try std.testing.expectEqualSlices(u8, &@as([payload_length - 3]u8, @splat(0xFF)), report[4..]);
 }
 
 test "A8 LED color packets carry up to nine HSV triplets" {
@@ -402,7 +402,7 @@ test "reply matcher accepts matching replies and detects unsupported failed and 
     var request: [report_length]u8 = undefined;
     buildA8(&request, 0x01, &.{});
     var matcher = RequestMatcher.init(request[1..]).?;
-    var response = [_]u8{0} ** payload_length;
+    var response: [payload_length]u8 = @splat(0);
     response[0] = 0xA8;
     response[1] = 0x01;
     response[2] = 0x00;
@@ -412,13 +412,13 @@ test "reply matcher accepts matching replies and detects unsupported failed and 
     failed[2] = 0x01;
     var failed_matcher = RequestMatcher.init(request[1..]).?;
     try std.testing.expectEqual(ReplyMatch.failed, failed_matcher.observe(&failed));
-    var unsupported = [_]u8{0} ** payload_length;
+    var unsupported: [payload_length]u8 = @splat(0);
     unsupported[0] = 0xFF;
     try std.testing.expectEqual(ReplyMatch.unsupported, failed_matcher.observe(&unsupported));
 }
 
 test "A2 parser reads the RGB support bit" {
-    var response = [_]u8{0} ** payload_length;
+    var response: [payload_length]u8 = @splat(0);
     response[0] = 0xA2;
     response[2] = 0x80;
     try std.testing.expectEqual(true, a2RgbFlag(&response).?);
@@ -428,7 +428,7 @@ test "A2 parser reads the RGB support bit" {
 
 test "LED map builder converts A8 row replies to row-major order and X positions" {
     var builder = LedMapBuilder.init(3);
-    var response = [_]u8{0xFF} ** payload_length;
+    var response: [payload_length]u8 = @splat(0xFF);
     response[0] = 0xA8;
     response[1] = 0x06;
     response[2] = 0;
@@ -474,7 +474,7 @@ test "LED map builder finds all 108 LEDs of the 21-column Q6 HE ANSI matrix" {
 
 test "LED map builder rejects duplicate out of range and incomplete rows" {
     var duplicate = LedMapBuilder.init(2);
-    var response = [_]u8{0xFF} ** payload_length;
+    var response: [payload_length]u8 = @splat(0xFF);
     response[0] = 0xA8;
     response[1] = 0x06;
     response[2] = 0;
@@ -504,7 +504,7 @@ test "quiesce waits for quiet reports or the five second cap" {
     try std.testing.expectEqual(QuiesceRelease.none, quiet.release(1999));
     try std.testing.expectEqual(QuiesceRelease.quiet, quiet.release(2000));
     var flood = Quiesce.start(1000);
-    var report = [_]u8{0} ** payload_length;
+    var report: [payload_length]u8 = @splat(0);
     report[0] = 0x07;
     flood.observeReport(1900, &report);
     flood.observeReport(2900, &report);
@@ -517,7 +517,7 @@ test "quiesce waits for quiet reports or the five second cap" {
 
 test "A3 reports do not extend the quiesce window" {
     var quiesce = Quiesce.start(1000);
-    var report = [_]u8{0} ** payload_length;
+    var report: [payload_length]u8 = @splat(0);
     report[0] = 0xA3;
     quiesce.observeReport(1500, &report);
     quiesce.observeReport(1900, &report);

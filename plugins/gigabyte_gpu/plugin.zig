@@ -19,7 +19,7 @@ const max_leds = protocol.max_led_count;
 
 const ZoneState = struct {
     info: abi.ZoneInfo = .{ .name = null, .led_count = 0, .max_leds = 0 },
-    colors: [max_leds]abi.Rgb = [_]abi.Rgb{abi.Rgb.black} ** max_leds,
+    colors: [max_leds]abi.Rgb = @splat(abi.Rgb.black),
     dirty: bool = false,
     host_streamed: bool = false,
     mode_pending: bool = true,
@@ -46,9 +46,9 @@ const Device = struct {
     layout: protocol.ZoneLayout,
     address: u7,
     lost: bool = false,
-    id_buffer: [max_id_len + 1]u8 = [_]u8{0} ** (max_id_len + 1),
-    name_buffer: [max_name_len + 1]u8 = [_]u8{0} ** (max_name_len + 1),
-    zone_storage: [max_zones]ZoneState = [_]ZoneState{.{}} ** max_zones,
+    id_buffer: [max_id_len + 1]u8 = @splat(0),
+    name_buffer: [max_name_len + 1]u8 = @splat(0),
+    zone_storage: [max_zones]ZoneState = @splat(.{}),
     zone_pointers: [max_zones]*const abi.ZoneInfo = undefined,
     info: abi.DeviceInfo = .{ .zone_count = 0, .id = null, .name = null, .zones = null, .max_fps = protocol.device_max_fps },
 
@@ -152,7 +152,7 @@ const LcdPanel = struct {
     last_sent: ?lcd.Encoded = null,
     last_sent_ms: u64 = 0,
     last_tick_ms: u64 = 0,
-    holds: [8]lcd.SensorHold = [_]lcd.SensorHold{.{}} ** 8,
+    holds: [8]lcd.SensorHold = @splat(.{}),
 };
 
 const Instance = struct {
@@ -621,7 +621,7 @@ const Instance = struct {
         }
         self.lcd.last_tick_ms = now_ms;
         if (now_ms < self.lcd.retry_at_ms) return;
-        var readings = [_]f64{0} ** 8;
+        var readings: [8]f64 = @splat(0);
         var waiting = true;
         for (lcd.metric_sensors, 0..) |name, index| {
             if ((self.lcd.flags >> @intCast(index)) & 1 == 0) continue;

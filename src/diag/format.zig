@@ -74,12 +74,12 @@ fn isSupportedSpec(spec: []const u8) bool {
 }
 
 pub fn print(buffer: []u8, comptime format: []const u8, args: anytype) []const u8 {
-    const fields = @typeInfo(@TypeOf(args)).@"struct".fields;
+    const field_names = @typeInfo(@TypeOf(args)).@"struct".field_names;
     comptime {
-        if (countPlaceholders(format) != fields.len) @compileError("format argument count mismatch: " ++ format);
+        if (countPlaceholders(format) != field_names.len) @compileError("format argument count mismatch: " ++ format);
     }
-    var values: [fields.len]Arg = undefined;
-    inline for (fields, 0..) |field, index| values[index] = toArg(@field(args, field.name));
+    var values: [field_names.len]Arg = undefined;
+    inline for (field_names, 0..) |field_name, index| values[index] = toArg(@field(args, field_name));
     return render(buffer, format, &values);
 }
 
@@ -103,12 +103,12 @@ pub fn fixed(buffer: []u8, value: f64, comptime decimals: u8) []const u8 {
 }
 
 pub fn bufPrint(buffer: []u8, comptime format: []const u8, args: anytype) error{NoSpaceLeft}![]const u8 {
-    const fields = @typeInfo(@TypeOf(args)).@"struct".fields;
+    const field_names = @typeInfo(@TypeOf(args)).@"struct".field_names;
     comptime {
-        if (countPlaceholders(format) != fields.len) @compileError("format argument count mismatch: " ++ format);
+        if (countPlaceholders(format) != field_names.len) @compileError("format argument count mismatch: " ++ format);
     }
-    var values: [fields.len]Arg = undefined;
-    inline for (fields, 0..) |field, index| values[index] = toArg(@field(args, field.name));
+    var values: [field_names.len]Arg = undefined;
+    inline for (field_names, 0..) |field_name, index| values[index] = toArg(@field(args, field_name));
     var writer = Writer{ .buffer = buffer };
     renderInto(&writer, format, &values);
     if (writer.overflowed) return error.NoSpaceLeft;

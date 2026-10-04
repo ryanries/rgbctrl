@@ -127,7 +127,7 @@ test "sensor names use lowercase letters, digits, dots and underscores up to 31 
     try testing.expect(!isValidName("CPU.temp"));
     try testing.expect(!isValidName("cpu temp"));
     try testing.expect(!isValidName(""));
-    try testing.expect(!isValidName("a" ** 32));
+    try testing.expect(!isValidName(&@as([32]u8, @splat('a'))));
 }
 
 test "standard names are reserved for their documented sources and others need the plugin prefix" {

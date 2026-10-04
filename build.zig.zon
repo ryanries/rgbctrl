@@ -2,7 +2,7 @@
     .name = .rgbctrl,
     .version = "0.1.0",
     .fingerprint = 0x33feabd5385033fa,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .pawnio_modules = .{
             .url = "https://github.com/namazso/PawnIO.Modules/releases/download/0.2.11/release_0_2_11.zip",

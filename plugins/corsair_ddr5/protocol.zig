@@ -170,7 +170,7 @@ fn isSupportedProduct(product_id: u16) bool {
 }
 
 fn validInfoBlock(product_id: u16, protocol_version: u8) InfoRead {
-    var block: [info_length]u8 = [_]u8{0} ** info_length;
+    var block: [info_length]u8 = @splat(0);
     std.mem.writeInt(u16, block[0..2], 0x1B1C, .little);
     std.mem.writeInt(u16, block[2..4], product_id, .little);
     block[8] = 2;
@@ -185,7 +185,7 @@ test "crc8 matches the published SMBus check value" {
 }
 
 test "frame builder emits the all red DDR5 direct frame vector" {
-    const colors = [_]sdk.abi.Rgb{.{ .r = 0xFF, .g = 0, .b = 0 }} ** led_count;
+    const colors: [led_count]sdk.abi.Rgb = @splat(.{ .r = 0xFF, .g = 0, .b = 0 });
     const frame = buildFrame(&colors);
     try std.testing.expectEqual(@as(u8, 0x0A), frame[0]);
     for (0..led_count) |index| {
@@ -198,10 +198,10 @@ test "frame builder emits the all red DDR5 direct frame vector" {
 }
 
 test "frame builder emits the all off and all white CRC vectors" {
-    const off_colors = [_]sdk.abi.Rgb{sdk.abi.Rgb.black} ** led_count;
+    const off_colors: [led_count]sdk.abi.Rgb = @splat(sdk.abi.Rgb.black);
     const off_frame = buildFrame(&off_colors);
     try std.testing.expectEqual(@as(u8, 0xBB), off_frame[31]);
-    const white_colors = [_]sdk.abi.Rgb{.{ .r = 0xFF, .g = 0xFF, .b = 0xFF }} ** led_count;
+    const white_colors: [led_count]sdk.abi.Rgb = @splat(.{ .r = 0xFF, .g = 0xFF, .b = 0xFF });
     const white_frame = buildFrame(&white_colors);
     try std.testing.expectEqual(@as(u8, 0x60), white_frame[31]);
 }

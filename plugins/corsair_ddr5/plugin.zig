@@ -23,8 +23,8 @@ const zone_names = [_][*:0]const u8{ "dimm1", "dimm2", "dimm3", "dimm4", "dimm5"
 
 const AddressSlot = struct {
     state: protocol.GuardState = .unknown,
-    colors: [protocol.led_count]abi.Rgb = [_]abi.Rgb{abi.Rgb.black} ** protocol.led_count,
-    last_sent: [protocol.led_count]abi.Rgb = [_]abi.Rgb{abi.Rgb.black} ** protocol.led_count,
+    colors: [protocol.led_count]abi.Rgb = @splat(abi.Rgb.black),
+    last_sent: [protocol.led_count]abi.Rgb = @splat(abi.Rgb.black),
     dirty: bool = false,
 };
 
@@ -32,7 +32,7 @@ const Instance = struct {
     host: sdk.HostApi,
     module: ?sdk.pawnio.Module = null,
     smbus_mutex: sdk.pawnio.InteropMutex = .{ .handle = null },
-    addresses: [protocol.address_count]AddressSlot = [_]AddressSlot{.{}} ** protocol.address_count,
+    addresses: [protocol.address_count]AddressSlot = @splat(.{}),
     zone_infos: [protocol.address_count]abi.ZoneInfo = undefined,
     zone_pointers: [protocol.address_count]*const abi.ZoneInfo = undefined,
     zone_address_indices: [protocol.address_count]usize = undefined,
@@ -124,7 +124,7 @@ const Instance = struct {
     fn writeFrame(self: *Instance, address: u8, frame: *const [protocol.frame_length]u8) !void {
         if (!protocol.isAllowedAddress(address)) return error.BadAddress;
         var module = &(self.module orelse return error.NoModule);
-        var input = [_]u64{0} ** 9;
+        var input: [9]u64 = @splat(0);
         input[0] = address;
         input[1] = 0;
         input[2] = protocol.direct_command;
