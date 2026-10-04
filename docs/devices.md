@@ -183,6 +183,48 @@ PC, and the log at `debug` level records every probe and response.
   zone receives host frames.
 - Conflicts: Keychron Launcher (also as a browser page), VIA, OpenRGB.
 
+## steelseries_apex: SteelSeries Apex Pro keyboard lighting
+
+- Match: VID 1038 with PID 1610, the full-size Apex Pro from 2019 (model KB-00009), on
+  interface 1: HID collection 0xFFC0 / 0x01 with 643-byte feature reports and 65-byte output
+  reports, report id 0. Opened exclusively. Other Apex models (the Pro TKL, the 2023 and Gen 3
+  models, the Apex 5, 7 and 9) have other ids, and some of the newer ones use other commands;
+  they are not matched. The other collections with the Apex Pro's id are logged at `debug` with
+  their usage and report sizes. When no Apex Pro is found, so are the other SteelSeries
+  collections, from what Windows reports about them, without reading from or writing to them.
+- Device `apex_pro`, zone `keys` (112 LEDs), one LED for every key id the Apex firmware knows,
+  in rows from the top left:
+  - Esc, F1 to F12, Print Screen, Scroll Lock, Pause, the media key;
+  - `` ` ``, 1 to 0, -, =, Yen (Japanese), Backspace, Insert, Home, Page Up, Num Lock, Num /,
+    Num *, Num -;
+  - Tab, Q to P, [, ], `\`, Delete, End, Page Down, Num 7, Num 8, Num 9, Num +;
+  - Caps Lock, A to L, ;, ', # (ISO), Enter, Num 4, Num 5, Num 6;
+  - Left Shift, `\` (ISO), Z to /, Ro (Japanese), Right Shift, Up, Num 1, Num 2, Num 3,
+    Num Enter;
+  - Left Ctrl, Left Windows, Left Alt, Muhenkan (Japanese), Space, Henkan (Japanese),
+    Kana (Japanese), Right Alt, the two keys between Right Alt and Right Ctrl, Right Ctrl, Left,
+    Down, Right, Num 0, Num .
+
+  A board ignores the keys it does not have (on a US board the ISO and Japanese ones), so the
+  order, and with it `led_colors`, is the same for every layout. The positions for spatial
+  effects follow the layout of a full-size keyboard.
+- Host frames only: no hardware effects and no `persist`, because no command for the
+  keyboard's stored lighting is documented. Every effect is drawn by rgbctrl and sent as one
+  feature report: `00 3A 70`, then the key id (the key's USB HID usage, or 0xF0 and 0xFB for
+  two SteelSeries keys) and R, G, B of all 112 keys, zero-padded to 643 bytes. At most 30
+  frames per second. Effects that do not move (`off`, `static`, `gradient`) are sent once,
+  the others every frame. rgbctrl sends the colors again after a resume, a reconnect or a
+  change to the zone's settings. A reconnect is noticed from the keyboard's handle, which is
+  read for waiting input reports every second and on every HID hotplug event. Whether the
+  keyboard keeps the colors through its own idle timeout is untested; if it does not, an effect
+  that does not move stays dark or changed until one of those. When rgbctrl stops it leaves the
+  colors on. Until rgbctrl applies the zone, the keyboard shows the lighting stored in it by
+  SteelSeries GG.
+- Discovery: `00 90` as an output report asks for the firmware version (read-only); the
+  version text in the reply is logged. A keyboard that does not answer within 250 ms still gets
+  its lighting.
+- Conflicts: SteelSeries GG (formerly SteelSeries Engine), OpenRGB, SignalRGB.
+
 ## sudokoo_sk700v: cooler display
 
 - Match: USB HID 381C:0003 with 64-byte output reports. Opened exclusively unless the

@@ -5,6 +5,7 @@ const plugin_names = [_][]const u8{
     "gigabyte_gpu",
     "corsair_ddr5",
     "keychron",
+    "steelseries_apex",
     "sudokoo_sk700v",
     "amd_cpu",
     "windows_metrics",

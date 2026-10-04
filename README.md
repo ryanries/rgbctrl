@@ -25,6 +25,7 @@ first-run checklist below and enable one device at a time.
 | Gigabyte AORUS RTX 5080 MASTER ICE (and other allowlisted Gigabyte GeForce cards) | fan rings and logos; on the 5080 MASTER ICE also GPU readings on the LCD (opt-in) | `gigabyte_gpu` | see "GPU readings on the RTX 5080 LCD" |
 | Corsair Vengeance RGB DDR5 | 10 LEDs per DIMM | `corsair_ddr5` | opt-in; needs PawnIO and elevation |
 | Keychron Q6 Max (3434:0860/0861/0862) and Q6 HE (3434:0B60/0B61/0B62) | per-key RGB | `keychron` | USB cable only (cable mode); per-key frames need firmware with the 0xA8 protocol |
+| SteelSeries Apex Pro, the full-size 2019 model (KB-00009, 1038:1610) | per-key RGB | `steelseries_apex` | host frames only; shows its own stored lighting until rgbctrl applies the zone |
 | Sudokoo SK700V (381C:0003) | CPU temperature, power, load and frequency readout | `sudokoo_sk700v` | the display has no fan speed field |
 | AMD Ryzen (Zen and later) | sensors: `cpu.temp`, `cpu.ccd<N>.temp`, `cpu.power` | `amd_cpu` | needs PawnIO and elevation |
 | Windows | sensors: `cpu.load`, `cpu.freq`, `mem.load` | `windows_metrics` | |
@@ -46,7 +47,7 @@ plugin sends during discovery, and known conflicts.
 
 Stability and readable code come before binary size. CI still fails a release build with a
 plugin above 128 KiB or an `rgbctrl.exe` above 512 KiB, but only to catch accidents such as a
-Debug build in the release output (today the plugins are 8 to 25 KiB and `rgbctrl.exe` about
+Debug build in the release output (today the plugins are 9 to 30 KiB and `rgbctrl.exe` about
 160 KiB).
 
 To install rgbctrl as a SYSTEM task later (see "Run at startup"), build in a folder that only
@@ -58,10 +59,10 @@ to copy such a build into the protected program folder.
 
 1. Close or uninstall the vendor tools that talk to the same devices: Gigabyte Control Center /
    RGB Fusion, AORUS Engine / GCC GPU lighting, Keychron Launcher (a browser tab with it open
-   also holds the keyboard), the Sudokoo / MasterCraft display software, Corsair iCUE, OpenRGB,
-   SignalRGB. rgbctrl opens the HID devices exclusively and reports "in use by another
-   application" when another program holds them. Windows Dynamic Lighting (Settings >
-   Personalization > Dynamic Lighting) should be turned off for these devices.
+   also holds the keyboard), SteelSeries GG, the Sudokoo / MasterCraft display software,
+   Corsair iCUE, OpenRGB, SignalRGB. rgbctrl opens the HID devices exclusively and reports "in
+   use by another application" when another program holds them. Windows Dynamic Lighting
+   (Settings > Personalization > Dynamic Lighting) should be turned off for these devices.
 2. For CPU temperature and power on the SK700V display and for DDR5 lighting, install the
    signed PawnIO driver: `winget install namazso.PawnIO`. These features also need rgbctrl to
    run elevated (the scheduled task does).
@@ -312,7 +313,12 @@ before they are loaded.
 ## Known limitations
 
 - Images, text and GIFs on the RTX 5080 LCD, Super I/O fan control, the Keychron wireless
-  modes (2.4 GHz dongle and Bluetooth) and DDR5 hardware effects are not implemented.
+  modes (2.4 GHz dongle and Bluetooth), the Apex Pro's OLED screen and DDR5 hardware effects are
+  not implemented.
+- The Apex Pro's stored lighting (set with SteelSeries GG) cannot be changed: rgbctrl only sends
+  it host frames, so until rgbctrl applies the zone the keyboard shows the stored lighting.
+  Whether the keyboard keeps rgbctrl's colors through its own idle timeout is untested. Other
+  Apex models are not supported.
 - The GPU LCD readout supports only the RTX 5080 AORUS MASTER ICE. The older controller's
   protocol was confirmed on that card by an open-source driver, which draws the overlay on an
   uploaded image; that the overlay also works on the built-in screens is documented only for the

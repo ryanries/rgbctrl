@@ -231,6 +231,12 @@ pub const Device = struct {
 pub fn pathContainsIds(path: []const u16, vendor_id: u16, product_id: u16) bool {
     var needle_buffer: [17]u8 = undefined;
     const needle = std.fmt.bufPrint(&needle_buffer, "vid_{x:0>4}&pid_{x:0>4}", .{ vendor_id, product_id }) catch return false;
+    return pathContains(path, needle);
+}
+
+/// True when the device path contains `needle`, ignoring ASCII case; `needle` must be lowercase.
+/// For example "&mi_01" selects interface 1 of a composite USB device.
+pub fn pathContains(path: []const u16, needle: []const u8) bool {
     if (path.len < needle.len) return false;
     var start: usize = 0;
     while (start + needle.len <= path.len) : (start += 1) {
@@ -268,6 +274,13 @@ test "pathContainsIds matches the VID and PID case-insensitively" {
     const path = std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\HID#VID_381C&PID_0003#7&abc#{4d1e55b2}");
     try std.testing.expect(pathContainsIds(path, 0x381C, 0x0003));
     try std.testing.expect(!pathContainsIds(path, 0x381C, 0x0004));
+}
+
+test "pathContains finds the interface number of a composite device" {
+    const path = std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\HID#VID_1038&PID_1610&MI_01#8&1a2b3c4d&0&0000#{4d1e55b2}");
+    try std.testing.expect(pathContains(path, "&mi_01"));
+    try std.testing.expect(!pathContains(path, "&mi_02"));
+    try std.testing.expect(!pathContains(std.unicode.utf8ToUtf16LeStringLiteral("&MI_0"), "&mi_01"));
 }
 
 test "listContents stops at the double NUL so unused buffer space never changes the hash" {

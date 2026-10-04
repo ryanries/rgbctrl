@@ -72,6 +72,7 @@ test "the shipped example configuration resolves every phase-1 zone without erro
     const logo = lighting_config.ZoneShape{ .flags = abi.zone_host_frames, .led_count = 1, .max_leds = 1, .hw_effects = gpu_effects, .hw_max_colors = 1 };
     const keys = lighting_config.ZoneShape{ .flags = abi.zone_host_frames | abi.zone_global_brightness_only, .led_count = 108, .max_leds = 113, .hw_effects = effects(&.{ .off, .static, .breathing, .cycle, .rainbow }), .hw_max_colors = 1 };
     const dimm = lighting_config.ZoneShape{ .flags = abi.zone_host_frames, .led_count = 10, .max_leds = 10 };
+    const apex_keys = lighting_config.ZoneShape{ .flags = abi.zone_host_frames, .led_count = 112, .max_leds = 112 };
     const cases = [_]ExpectedZone{
         .{ .device = "motherboard", .zone = "argb1", .shape = argb, .effect = .rainbow, .engine = .host, .leds = 30 },
         .{ .device = "motherboard", .zone = "argb2", .shape = argb, .effect = .gradient, .engine = .host, .leds = 30 },
@@ -86,6 +87,7 @@ test "the shipped example configuration resolves every phase-1 zone without erro
         .{ .device = "gpu", .zone = "logo_top", .shape = logo, .effect = .static, .engine = .hardware },
         .{ .device = "gpu", .zone = "extra", .shape = logo, .effect = .off, .engine = .hardware },
         .{ .device = "keyboard", .zone = "keys", .shape = keys, .effect = .rainbow, .engine = .hardware },
+        .{ .device = "apex_pro", .zone = "keys", .shape = apex_keys, .effect = .gradient, .engine = .host },
         .{ .device = "ram", .zone = "dimm1", .shape = dimm, .effect = .gradient, .engine = .host },
         .{ .device = "ram", .zone = "dimm2", .shape = dimm, .effect = .gradient, .engine = .host },
     };
@@ -104,6 +106,7 @@ test "the shipped example configuration resolves every phase-1 zone without erro
         .{ .key = "motherboard", .zone_names = &.{ "argb1", "argb2", "argb3", "rgb12v", "io_cover", "chipset" } },
         .{ .key = "gpu", .zone_names = &.{ "fan_right", "fan_left", "fan_middle", "logo_side", "logo_top", "extra" } },
         .{ .key = "keyboard", .zone_names = &.{"keys"} },
+        .{ .key = "apex_pro", .zone_names = &.{"keys"} },
         .{ .key = "ram", .zone_names = &.{ "dimm1", "dimm2" } },
     };
     try lighting_config.validateTree(arena, settings.lighting, &devices, &diagnostics);

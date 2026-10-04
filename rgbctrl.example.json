@@ -33,6 +33,10 @@
       "keys": { "effect": "rainbow", "speed": 30, "brightness": 50 }
     },
 
+    "apex_pro": {
+      "keys": { "effect": "gradient", "colors": ["#00A0FF", "#8000FF"] }
+    },
+
     "ram": {
       "dimm1": { "effect": "gradient", "colors": ["#FF0000", "#0000FF"] },
       "dimm2": { "effect": "gradient", "colors": ["#FF0000", "#0000FF"] }
