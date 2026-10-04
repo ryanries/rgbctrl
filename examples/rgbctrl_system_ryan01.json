@@ -1,0 +1,12 @@
+{
+  "plugins": {
+    "corsair_ddr5": { "enabled": true },
+    "gigabyte_gpu": { "persist": true, 
+                      "lcd": true, 
+                      "lcd_readout": true, 
+                      "lcd_screen": 1,
+                      "lcd_color": "#000000",
+                      "lcd_logo_color": "#FFFFFF" },
+    "gigabyte_fusion2": { "persist": true }
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "log": {
+    "level": "debug",
+    "file": "rgbctrl.log",
+    "max_size_kb": 1024
+  },
+
+  "frame_rate": 30,
+
+  "lighting": {
+    // Every device, every zone: pure static color at % brightness.
+    "*": {
+      "*": { "effect": "static", "color": "#0000FF", "brightness": 33 }
+    },
+
+    // The ARGB headers are resizable and show nothing at 0 LEDs, so give them a
+    // length. Adjust the counts to match your strips/fans;
+    "motherboard": {
+      "argb1": { "leds": 30, "effect": "static" },
+      "argb2": { "leds": 30, "effect": "static" },
+      "argb3": { "leds": 30, "effect": "static" },
+      // Onboard single-LED zones. These can ship running a factory rainbow,
+      // strobe or breathing effect that persists until each zone is set
+      // explicitly, so pin them here instead of relying on the "*" wildcard:
+      //   io_cover - the AORUS logo on the I/O shield
+      //   chipset  - the heatsink LED near the F_PANEL header
+      "io_cover": { "effect": "static", "color": "#0000FF", "brightness": 33 },
+      "chipset": { "effect": "static", "color": "#0000FF", "brightness": 33 }
+    },
+
+    // The GPU fan rings can likewise hold a factory rainbow until each fan zone
+    // is set explicitly. Add "logo_side"/"logo_top"/"extra" if yours need it.
+    "gpu": {
+      "fan_left": { "effect": "static", "color": "#0000FF", "brightness": 33 },
+      "fan_middle": { "effect": "static", "color": "#0000FF", "brightness": 33 },
+      "fan_right": { "effect": "static", "color": "#0000FF", "brightness": 33 }
+    },
+
+    "keyboard": {
+      "keys": { "effect": "static", "speed": 30, "brightness": 33 }
+    },
+
+    "ram": {
+      "dimm1": { "effect": "static", "color": "#0000FF", "brightness": 33 },
+      "dimm2": { "effect": "static", "color": "#0000FF", "brightness": 33 }
+    }
+  },
+
+  "plugins": {
+    "sudokoo_sk700v": {
+      "temp_sensor": "cpu.temp",
+      "power_sensor": "cpu.power",
+      "load_sensor": "cpu.load",
+      "freq_sensor": "cpu.freq",
+      "temperature_unit": "C",
+      "power_bar_max_watts": 160,
+      "blank_on_exit": true
+    }
+  }
+}
