@@ -16,6 +16,8 @@ const sensors = @import("sensors.zig");
 const clock_module = @import("clock.zig");
 const persist_policy = @import("persist_policy.zig");
 const safe_open = @import("../security/safe_open.zig");
+const install_check = @import("../security/install_check.zig");
+const inventory = @import("inventory.zig");
 
 const abi = sdk.abi;
 const win32 = sdk.win32;
@@ -33,6 +35,18 @@ const Environment = struct {
     plugins: []loader.Plugin,
     failures: []const loader.Failure,
     config: *generation.ConfigGeneration,
+    version: []const u8 = "",
+    account: inventory.Account = .standard,
+};
+
+// The configuration files of a reload that was refused, kept for the inventory while rgbctrl
+// still runs the configuration from before.
+const RefusedReload = struct {
+    base_status: []const u8,
+    user_status: []const u8,
+    base_failed: bool,
+    user_failed: bool,
+    problems: []const inventory.Problem,
 };
 
 const PluginState = struct {
@@ -66,11 +80,23 @@ pub const Supervisor = struct {
     binding_serial: u64 = 0,
     config_serial: u64 = 1,
     topology_changed: bool = false,
+    /// What polling compares with: the stamps of the files as last read.
     stamps: [2]generation.Stamp = .{ .{}, .{} },
+    /// The stamps of the files of the configuration in use, and of the files read last, which
+    /// differ while a refused reload keeps the previous configuration.
+    applied_stamps: [2]generation.Stamp = .{ .{}, .{} },
+    attempted_stamps: [2]generation.Stamp = .{ .{}, .{} },
     reload_pending: bool = false,
     change_seen_ms: u64 = 0,
     hid_hash: ?u64 = null,
     resume_detector: clock_module.ResumeDetector = undefined,
+    inventory_dirty: bool = true,
+    inventory_hash: ?u64 = null,
+    inventory_failure_logged: bool = false,
+    inventory_retry_ms: u64 = 0,
+    inventory_retry_delay_ms: u64 = 0,
+    refused_reload: ?RefusedReload = null,
+    refused_arena: std.heap.ArenaAllocator,
 
     pub fn create(env: Environment) !*Supervisor {
         const self = try heap.allocator.create(Supervisor);
@@ -88,11 +114,16 @@ pub const Supervisor = struct {
             .config = env.config.retain(),
             .epoch_arena = std.heap.ArenaAllocator.init(heap.allocator),
             .alias_arena = std.heap.ArenaAllocator.init(heap.allocator),
+            .refused_arena = std.heap.ArenaAllocator.init(heap.allocator),
         };
         self.worker_shared = .{ .mode = env.mode, .clock = env.clock, .logger = env.logger, .persist_registry = &self.persist_registry, .supervisor_event = event };
         self.diagnostics = Diagnostics.init(self.epoch_arena.allocator());
         self.resume_detector = clock_module.ResumeDetector.init();
-        self.stamps = .{ generation.stampFor(env.sources.base_file, env.sources.elevated), generation.stampFor(env.sources.user_file, env.sources.elevated) };
+        // The stamps of the files main read, not of the files now: a change made while the
+        // plugins loaded must still trigger a reload.
+        self.stamps = .{ env.config.base.stamp, env.config.user.stamp };
+        self.applied_stamps = self.stamps;
+        self.attempted_stamps = self.stamps;
         for (env.plugins, 0..) |*plugin, index| {
             self.states[index] = .{};
             self.contexts[index].init(&self.services, @intCast(index + 1), plugin.name, env.host_dir, env.mode.abiMode());
@@ -152,11 +183,12 @@ pub const Supervisor = struct {
             if (known) continue;
             reported += 1;
             if (suggest.closest(member.key, names[0..count])) |suggestion| {
-                self.logger().log(.warn, "config", "line {d}:{d}: plugins.{s} matches no loaded plugin; did you mean \"{s}\"?", .{ member.value.line, member.value.column, member.key, suggestion });
+                self.diagnostics.warn("line {d}:{d}: plugins.{s} matches no loaded plugin; did you mean \"{s}\"?", .{ member.value.line, member.value.column, member.key, suggestion });
             } else {
-                self.logger().log(.warn, "config", "line {d}:{d}: plugins.{s} matches no loaded plugin", .{ member.value.line, member.value.column, member.key });
+                self.diagnostics.warn("line {d}:{d}: plugins.{s} matches no loaded plugin", .{ member.value.line, member.value.column, member.key });
             }
         }
+        self.logNewDiagnostics();
     }
 
     pub fn logConfigDiagnostics(logger_instance: *log.Logger, config: *generation.ConfigGeneration) void {
@@ -173,6 +205,7 @@ pub const Supervisor = struct {
         for (entries[self.logged_diagnostics..]) |entry| {
             self.logger().write(if (entry.severity == .failure) .err else .warn, "config", entry.message);
         }
+        if (entries.len > self.logged_diagnostics) self.inventory_dirty = true;
         self.logged_diagnostics = entries.len;
     }
 
@@ -182,17 +215,21 @@ pub const Supervisor = struct {
         for (self.workers, 0..) |*worker, index| {
             const report = worker.takeReport();
             const state = &self.states[index];
+            if (state.open_state != report.open_state) self.inventory_dirty = true;
             state.open_state = report.open_state;
             state.applied_serial = report.applied_binding_serial;
             state.sensor_ticks = report.sensor_ticks;
             state.exited = report.exited;
-            if (!report.has_devices) continue;
-            if (state.devices) |previous| previous.release();
-            state.devices = report.devices;
-            if (index < changed.len) changed[index] = true;
-            any_changed = true;
+            if (report.has_devices) {
+                if (state.devices) |previous| previous.release();
+                state.devices = report.devices;
+                if (index < changed.len) changed[index] = true;
+                any_changed = true;
+            }
+            if (report.metadata) |fresh| self.adoptMetadata(state, fresh);
         }
         if (!any_changed) return;
+        self.inventory_dirty = true;
         self.recomputeAliases();
         for (self.states, 0..) |*state, index| {
             if (index < changed.len and changed[index]) self.logInventory(index, state);
@@ -200,6 +237,24 @@ pub const Supervisor = struct {
         for (self.states, 0..) |_, index| self.rebind(index);
         self.topology_changed = true;
         self.validateLightingWhenReady();
+    }
+
+    /// Takes newer details of the devices a plugin already reported, such as LED counts after a
+    /// resize. The ids and zones are the same, so aliases and bindings stay as they are.
+    fn adoptMetadata(self: *Supervisor, state: *PluginState, fresh: *bindings.DeviceSet) void {
+        const current = state.devices orelse {
+            fresh.release();
+            return;
+        };
+        if (current.serial != fresh.serial or !current.sameTopology(fresh)) {
+            fresh.release();
+            return;
+        }
+        current.release();
+        state.devices = fresh;
+        // Aliases can be slices of the released set.
+        self.recomputeAliases();
+        self.inventory_dirty = true;
     }
 
     fn allOpensReported(self: *Supervisor) bool {
@@ -377,6 +432,7 @@ pub const Supervisor = struct {
         var next_hotplug_poll: u64 = 0;
         var next_resume_poll: u64 = 0;
         var next_sensor_log: u64 = 60_000;
+        var next_inventory_check: u64 = 30_000;
         while (true) {
             if (self.waitForEvents(250)) {
                 self.logger().log(.info, source, "stop requested", .{});
@@ -401,6 +457,11 @@ pub const Supervisor = struct {
                 self.logSensors();
                 next_sensor_log = now + 60_000;
             }
+            if (now >= next_inventory_check) {
+                self.checkInventoryPresent();
+                next_inventory_check = now + 30_000;
+            }
+            if (self.inventory_dirty) self.publishInventory(now);
         }
     }
 
@@ -427,9 +488,17 @@ pub const Supervisor = struct {
         if (fresh.layer_failed) {
             logConfigDiagnostics(self.logger(), fresh);
             self.logger().log(.err, "config", "configuration not reloaded because a file could not be used; keeping the previous configuration", .{});
+            self.attempted_stamps = .{ fresh.base.stamp, fresh.user.stamp };
+            self.stamps = self.attempted_stamps;
+            self.rememberRefusedReload(fresh);
             fresh.release();
             return;
         }
+        self.refused_reload = null;
+        self.applied_stamps = .{ fresh.base.stamp, fresh.user.stamp };
+        self.attempted_stamps = self.applied_stamps;
+        self.stamps = self.applied_stamps;
+        self.inventory_dirty = true;
         self.logger().log(.info, "config", "configuration changed; reloading", .{});
         logConfigDiagnostics(self.logger(), fresh);
         const settings = &fresh.settings;
@@ -472,6 +541,145 @@ pub const Supervisor = struct {
         self.logger().switchFileName(file_name) catch |err| {
             self.logger().log(.err, source, "cannot open log file {s}: {s}; keeping the current log", .{ file_name, safe_open.describe(err) });
         };
+    }
+
+    fn rememberRefusedReload(self: *Supervisor, refused: *generation.ConfigGeneration) void {
+        self.refused_reload = null;
+        self.inventory_dirty = true;
+        _ = self.refused_arena.reset(.retain_capacity);
+        const arena = self.refused_arena.allocator();
+        var buffer: [512]u8 = undefined;
+        const base_status = arena.dupe(u8, generation.describeStatus(&buffer, refused.base.status)) catch return;
+        const user_status = arena.dupe(u8, generation.describeStatus(&buffer, refused.user.status)) catch return;
+        const entries = refused.diagnostics.entries.items;
+        const problems = arena.alloc(inventory.Problem, entries.len) catch return;
+        for (entries, problems) |entry, *problem| {
+            problem.* = .{ .severity = if (entry.severity == .failure) .@"error" else .warning, .message = arena.dupe(u8, entry.message) catch return };
+        }
+        self.refused_reload = .{ .base_status = base_status, .user_status = user_status, .base_failed = refused.base.failed(), .user_failed = refused.user.failed(), .problems = problems };
+    }
+
+    /// Writes what this rgbctrl found next to its log for rgbctrl-gui, when it changed. A failed
+    /// write is retried after a pause that doubles up to a minute.
+    fn publishInventory(self: *Supervisor, now: u64) void {
+        if (self.env.mode != .run) {
+            self.inventory_dirty = false;
+            return;
+        }
+        if (now < self.inventory_retry_ms) return;
+        var path_buffer: [1100]u16 = undefined;
+        const path = self.inventoryPath(&path_buffer) orelse return self.retryInventory(now);
+        var scratch = std.heap.ArenaAllocator.init(heap.allocator);
+        defer scratch.deinit();
+        const arena = scratch.allocator();
+        const snapshot = self.inventorySnapshot(arena) catch return self.retryInventory(now);
+        const text = inventory.render(arena, &snapshot) catch return self.retryInventory(now);
+        const hash = std.hash.Wyhash.hash(0, text);
+        if (self.inventory_hash == hash) {
+            self.inventory_dirty = false;
+            return;
+        }
+        safe_open.replaceContents(path, text, .{ .no_reparse = self.env.account != .standard }) catch |err| {
+            if (!self.inventory_failure_logged) {
+                self.inventory_failure_logged = true;
+                self.logger().log(.warn, source, "cannot write {s}: {s}; rgbctrl-gui will not show the current devices", .{ inventory.file_name, safe_open.describe(err) });
+            }
+            return self.retryInventory(now);
+        };
+        self.inventory_hash = hash;
+        self.inventory_dirty = false;
+        self.inventory_failure_logged = false;
+        self.inventory_retry_delay_ms = 0;
+    }
+
+    fn retryInventory(self: *Supervisor, now: u64) void {
+        self.inventory_retry_delay_ms = if (self.inventory_retry_delay_ms == 0) 2000 else @min(self.inventory_retry_delay_ms * 2, 60_000);
+        self.inventory_retry_ms = now + self.inventory_retry_delay_ms;
+    }
+
+    fn inventoryPath(self: *Supervisor, buffer: []u16) ?[:0]const u16 {
+        var directory_buffer: [1024]u16 = undefined;
+        const directory = self.logger().directoryPath(&directory_buffer) orelse return null;
+        return install_check.join(buffer, directory, win32.L(inventory.file_name));
+    }
+
+    /// Writes the inventory again when someone deleted it.
+    fn checkInventoryPresent(self: *Supervisor) void {
+        if (self.env.mode != .run or self.inventory_hash == null) return;
+        var path_buffer: [1100]u16 = undefined;
+        const path = self.inventoryPath(&path_buffer) orelse return;
+        if (install_check.exists(path)) return;
+        self.inventory_hash = null;
+        self.inventory_dirty = true;
+    }
+
+    fn inventorySnapshot(self: *Supervisor, arena: std.mem.Allocator) error{OutOfMemory}!inventory.Inventory {
+        const config = self.config;
+        var status_buffer: [512]u8 = undefined;
+        var stamp_buffer: [48]u8 = undefined;
+        var snapshot = inventory.Inventory{
+            .rgbctrl_version = self.env.version,
+            .account = self.env.account,
+            .base = .{
+                .path = config.base.path,
+                .status = try arena.dupe(u8, generation.describeStatus(&status_buffer, config.base.status)),
+                .privileged = config.base.status == .used,
+                .failed = config.base.failed(),
+                .applied_stamp = try arena.dupe(u8, stampText(&stamp_buffer, self.applied_stamps[0])),
+                .attempted_stamp = try arena.dupe(u8, stampText(&stamp_buffer, self.attempted_stamps[0])),
+            },
+            .user = .{
+                .path = config.user.path,
+                .status = try arena.dupe(u8, generation.describeStatus(&status_buffer, config.user.status)),
+                .privileged = config.user.status == .used,
+                .failed = config.user.failed(),
+                .applied_stamp = try arena.dupe(u8, stampText(&stamp_buffer, self.applied_stamps[1])),
+                .attempted_stamp = try arena.dupe(u8, stampText(&stamp_buffer, self.attempted_stamps[1])),
+            },
+        };
+        var problems: std.ArrayList(inventory.Problem) = .empty;
+        if (self.refused_reload) |refused| {
+            snapshot.kept_previous = true;
+            snapshot.base.status = refused.base_status;
+            snapshot.user.status = refused.user_status;
+            snapshot.base.failed = refused.base_failed;
+            snapshot.user.failed = refused.user_failed;
+            try problems.appendSlice(arena, refused.problems);
+        } else {
+            for ([_]*const Diagnostics{ &config.diagnostics, &self.diagnostics }) |diagnostics| {
+                for (diagnostics.entries.items) |entry| {
+                    try problems.append(arena, .{ .severity = if (entry.severity == .failure) .@"error" else .warning, .message = entry.message });
+                }
+            }
+        }
+        snapshot.problems = problems.items;
+        const plugins = try arena.alloc(inventory.Plugin, self.env.plugins.len);
+        for (self.env.plugins, self.states, plugins) |*plugin, state, *entry| {
+            entry.* = .{
+                .name = plugin.name,
+                .version = plugin.version,
+                .file = plugin.file_name,
+                .transports = plugin.table.transports,
+                .opt_in = plugin.isOptIn(),
+                .sensors = plugin.isSensorSource(),
+                .enabled = state.enabled,
+                .state = inventoryState(state),
+            };
+        }
+        snapshot.plugins = plugins;
+        var devices: std.ArrayList(inventory.Device) = .empty;
+        for (self.states, 0..) |*state, index| {
+            const set = state.devices orelse continue;
+            for (set.devices, 0..) |device, device_index| {
+                const zones = try arena.alloc(inventory.Zone, device.zones.len);
+                for (device.zones, zones) |zone, *entry| {
+                    entry.* = .{ .name = zone.name, .leds = zone.led_count, .max_leds = zone.max_leds, .flags = zone.flags, .hardware_effects = zone.hw_effects, .hardware_max_colors = zone.hw_max_colors };
+                }
+                try devices.append(arena, .{ .key = aliasOf(state, device_index, device.id), .name = device.name, .plugin = self.env.plugins[index].name, .zones = zones });
+            }
+        }
+        snapshot.devices = devices.items;
+        return snapshot;
     }
 
     fn pollHotplug(self: *Supervisor) void {
@@ -610,6 +818,20 @@ pub const Supervisor = struct {
 fn aliasOf(state: *const PluginState, device_index: usize, device_id: []const u8) []const u8 {
     if (device_index < state.aliases.len) return state.aliases[device_index];
     return device_id;
+}
+
+fn stampText(buffer: []u8, stamp: generation.Stamp) []const u8 {
+    return inventory.formatStamp(buffer, stamp.exists, stamp.write_time, stamp.size);
+}
+
+fn inventoryState(state: PluginState) inventory.PluginState {
+    if (!state.enabled) return .disabled;
+    return switch (state.open_state) {
+        .idle => .opening,
+        .opened => .active,
+        .failed => .failed,
+        .closed => .closed,
+    };
 }
 
 fn describeFlags(buffer: []u8, flags: u32) []const u8 {

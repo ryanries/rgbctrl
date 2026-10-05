@@ -329,6 +329,8 @@ fn runHost(arena: std.mem.Allocator, mode: supervisor_module.Mode, config_option
         .plugins = plugins,
         .failures = loaded.failures,
         .config = config,
+        .version = version,
+        .account = if (privilege.system) .system else if (privilege.elevated) .elevated else .standard,
     }) catch {
         fail("cannot start the plugin workers");
         return exit_usage;

@@ -10,6 +10,8 @@ either once (`apply`) or resident (`run`, for example as a SYSTEM scheduled task
 - Every device family is a separate DLL in `plugins\` that implements the C ABI in
   `include\rgbctrl_plugin.h`. Anyone can add hardware by writing another DLL, in Zig with the
   SDK in `sdk\` or in C (see `examples\c_plugin\virtual_led.c` and `docs\plugin-abi.md`).
+- `rgbctrl-gui.exe` ("rgbctrl Settings") is an optional window for choosing effects, colors
+  and plugins without editing JSON (see "Settings window").
 - Written in Zig 0.17.0 against the Win32 API directly; no runtime dependencies besides
   Windows itself (and the PawnIO driver for the features that need it).
 
@@ -38,7 +40,7 @@ plugin sends during discovery, and known conflicts.
 
 1. Install Zig 0.17.0 (`winget install zig.zig --version 0.17.0`).
 2. `zig build --release` builds everything into `zig-out\`:
-   - `bin\rgbctrl.exe`, `bin\plugins\*.dll`, `bin\rgbctrl.example.json`
+   - `bin\rgbctrl.exe`, `bin\rgbctrl-gui.exe`, `bin\plugins\*.dll`, `bin\rgbctrl.example.json`
    - `bin\pawnio\AMDFamily17.bin` and `bin\pawnio\SmbusPIIX4.bin` (downloaded once from the
      pinned PawnIO.Modules 0.2.11 release and verified by hash; `-Dpawnio-modules=false` skips them)
    - `bin\examples\virtual_led.dll` (the example plugin) and `include\rgbctrl_plugin.h`
@@ -46,9 +48,9 @@ plugin sends during discovery, and known conflicts.
    against the virtual plugin (it never loads the hardware plugins).
 
 Stability and readable code come before binary size. CI still fails a release build with a
-plugin above 128 KiB or an `rgbctrl.exe` above 512 KiB, but only to catch accidents such as a
-Debug build in the release output (today the plugins are 9 to 30 KiB and `rgbctrl.exe` about
-160 KiB).
+plugin above 128 KiB or an `rgbctrl.exe` or `rgbctrl-gui.exe` above 512 KiB, but only to catch
+accidents such as a Debug build in the release output (today the plugins are 9 to 30 KiB,
+`rgbctrl.exe` about 170 KiB and `rgbctrl-gui.exe` about 120 KiB).
 
 To install rgbctrl as a SYSTEM task later (see "Run at startup"), build in a folder that only
 you and administrators can modify, for example under your user profile: folders created
@@ -77,7 +79,8 @@ to copy such a build into the protected program folder.
    `rgbctrl.example.json` and keep only the devices you want to change; zones that are not
    mentioned are left untouched, except that the Gigabyte motherboard clears all of its zones
    before rgbctrl first writes to it (see `docs\devices.md`). `docs\configuration.md`
-   describes every key.
+   describes every key. Once rgbctrl runs, the settings window can make most of these changes
+   for you (see "Settings window").
 5. `rgbctrl apply` applies hardware effects and one frame of host effects and exits;
    `rgbctrl run` keeps animating, updates the SK700V display every second and reloads the
    configuration when you save it. Stop it with Ctrl+C or `rgbctrl stop`.
@@ -100,14 +103,28 @@ fresh install:
 - creates `%LOCALAPPDATA%\rgbctrl\rgbctrl.json` from the example if it does not exist,
 - registers the scheduled task `rgbctrl` that runs `rgbctrl run --config <your user file>` as
   SYSTEM at startup, and the Event Log source `rgbctrl`. `-StartNow` starts it immediately.
+- adds "rgbctrl Settings" (`rgbctrl-gui.exe`) to the Start menu of all users.
 
 Control the task with `Start-ScheduledTask -TaskName rgbctrl` and
 `Stop-ScheduledTask -TaskName rgbctrl`, or `rgbctrl stop` from an elevated prompt (that path
 lets rgbctrl shut down cleanly: final save to device memory when enabled, SK700V blanked).
 Stopping the task terminates the process without that cleanup. The log of the task is
 `%ProgramFiles%\rgbctrl\rgbctrl.log`. `scripts\uninstall.ps1` removes the task, the program
-folder and the Event Log source and keeps both configuration files. Upgrades are an uninstall
-followed by an install.
+folder, the Start menu entry and the Event Log source and keeps both configuration files.
+Upgrades are an uninstall followed by an install.
+
+## Settings window
+
+"rgbctrl Settings" (`rgbctrl-gui.exe`) shows the devices and zones the running rgbctrl found
+and lets you pick an effect, colors, speed and brightness for all devices, a device or a zone,
+set the LED count of the ARGB headers, and turn plugins on and off. Save writes your settings
+file, keeping its comments and layout, and the running rgbctrl applies the change within about
+two seconds; the window then reports whether it did. Turning on an opt-in plugin such as the
+DDR5 lighting asks for administrator approval, because it goes to the admin-only base file.
+
+The window never talks to the devices: a resident rgbctrl writes what it found to
+`rgbctrl.inventory.json` next to its log, and the window reads that. `docs\gui.md` describes
+the window, how it writes the files and the inventory format.
 
 ## Making hardware effects survive gaming and reboots
 
@@ -288,6 +305,9 @@ instance lock), so stop the resident instance before using `apply` or `list`.
 - The banner at the top of every run lists the version, mode, paths, Windows build,
   privileges, the install check, the PawnIO driver, every plugin and device, and both config
   files with their status.
+- A resident `run` also keeps `rgbctrl.inventory.json` next to the log up to date: the plugins,
+  devices and zones it found, the configuration problems, and which version of each settings
+  file it uses (format in `docs\gui.md`).
 
 ## Security model
 
@@ -302,12 +322,17 @@ path, a `plugins` section with more than 256 entries is ignored, and it can only
 privileged keys more restrictive; those keys (`enabled`, `persist`, `extra_ids`,
 `sudokoo_sk700v.exclusive`, `gigabyte_gpu.lcd` and `gigabyte_gpu.lcd_readout`) take effect
 from the admin-only base file only. PawnIO modules are checked against pinned SHA-256 hashes
-before they are loaded.
+before they are loaded. The settings window runs without administrator rights; only turning
+on an opt-in plugin starts it again as administrator, after your approval, to edit the base
+file, and only when its program file can be changed by administrators alone, as with the
+installed copy. `check-install` also checks `rgbctrl-gui.exe` when it is installed
+(`docs\gui.md`).
 
 ## Documentation
 
 - `docs\configuration.md`: configuration files, every key, effects, engines, reload.
 - `docs\devices.md`: devices, zones, effects, discovery transactions, conflicts.
+- `docs\gui.md`: the settings window, how it writes the files, the inventory format.
 - `docs\plugin-abi.md`: the plugin ABI, the Zig SDK, the C example, and the terminology.
 
 ## Known limitations
@@ -329,6 +354,9 @@ before they are loaded.
 - The motherboard's `io_cover` and `chipset` zones are single-color in rgbctrl, although they
   are addressable LED strips (`docs\devices.md`), so a host effect such as `rainbow` shows one
   color across the whole zone.
+- The settings window edits effects, colors, speed, brightness, ARGB LED counts and which
+  plugins run; per-LED colors, engines, `persist` and the plugins' own settings, such as the GPU
+  LCD readout, still need a text editor. It has no live preview.
 - On the X870E AORUS PRO ICE the I/O cover once stopped following color changes and stayed on
   the first new color, while `persist` was saving to flash within 30 ms of each change; a
   reboot cleared it. rgbctrl now saves only after a device's effects have been unchanged for

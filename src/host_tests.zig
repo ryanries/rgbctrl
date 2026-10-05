@@ -28,6 +28,12 @@ test {
     _ = @import("runtime/clock.zig");
     _ = @import("runtime/persist_policy.zig");
     _ = @import("runtime/bindings.zig");
+    _ = @import("runtime/inventory.zig");
+    _ = @import("gui/jsonc_edit.zig");
+    _ = @import("gui/files.zig");
+    _ = @import("gui/model.zig");
+    _ = @import("gui/win32_ui.zig");
+    _ = @import("gui/elevate.zig");
     _ = @import("plugin_host/validate.zig");
     _ = @import("plugin_host/loader.zig");
     _ = @import("plugin_host/host_services.zig");

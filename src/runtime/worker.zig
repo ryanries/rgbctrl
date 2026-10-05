@@ -128,6 +128,8 @@ pub const Worker = struct {
     pending_binding: ?*bindings.BindingGeneration = null,
     pending_exit: bool = false,
     reported_devices: ?*bindings.DeviceSet = null,
+    // Newer details of the reported devices with the same ids and zones (see publishMetadata).
+    reported_metadata: ?*bindings.DeviceSet = null,
     has_report: bool = false,
     open_state: OpenState = .idle,
     applied_binding_serial: u64 = 0,
@@ -219,6 +221,7 @@ pub const Worker = struct {
 
     const Report = struct {
         devices: ?*bindings.DeviceSet,
+        metadata: ?*bindings.DeviceSet,
         open_state: OpenState,
         applied_binding_serial: u64,
         sensor_ticks: u32,
@@ -226,11 +229,13 @@ pub const Worker = struct {
         exited: bool,
     };
 
+    /// The caller owns the reported device sets.
     pub fn takeReport(self: *Worker) Report {
         win32.AcquireSRWLockExclusive(&self.lock);
         defer win32.ReleaseSRWLockExclusive(&self.lock);
         const report = Report{
             .devices = self.reported_devices,
+            .metadata = self.reported_metadata,
             .has_devices = self.has_report,
             .open_state = self.open_state,
             .applied_binding_serial = self.applied_binding_serial,
@@ -238,6 +243,7 @@ pub const Worker = struct {
             .exited = self.exited,
         };
         self.reported_devices = null;
+        self.reported_metadata = null;
         self.has_report = false;
         return report;
     }
@@ -245,9 +251,21 @@ pub const Worker = struct {
     fn publishDevices(self: *Worker, devices: ?*bindings.DeviceSet, state: OpenState) void {
         win32.AcquireSRWLockExclusive(&self.lock);
         if (self.reported_devices) |previous| previous.release();
+        if (self.reported_metadata) |previous| previous.release();
+        self.reported_metadata = null;
         self.reported_devices = if (devices) |set| set.retain() else null;
         self.has_report = true;
         self.open_state = state;
+        win32.ReleaseSRWLockExclusive(&self.lock);
+        _ = win32.SetEvent(self.shared.supervisor_event);
+    }
+
+    /// Reports newer details, such as LED counts, of the devices last reported. The set must have
+    /// the same ids and zones and carry the serial of the current set, which keeps bindings valid.
+    fn publishMetadata(self: *Worker, devices: *bindings.DeviceSet) void {
+        win32.AcquireSRWLockExclusive(&self.lock);
+        if (self.reported_metadata) |previous| previous.release();
+        self.reported_metadata = devices.retain();
         win32.ReleaseSRWLockExclusive(&self.lock);
         _ = win32.SetEvent(self.shared.supervisor_event);
     }
@@ -415,8 +433,13 @@ pub const Worker = struct {
             if (self.devices) |current| {
                 if (current.sameTopology(fresh) and self.binding != null) {
                     for (self.runtime, 0..) |*device, device_index| {
+                        device.max_fps = fresh.devices[device_index].max_fps;
                         for (device.zones, 0..) |*zone, zone_index| zone.adopt(fresh.devices[device_index].zones[zone_index]);
                     }
+                    // The worker keeps its set, which the runtime's names point into; the
+                    // supervisor gets the new details under the same serial.
+                    fresh.serial = current.serial;
+                    self.publishMetadata(fresh);
                     fresh.release();
                     self.applyBinding(true);
                     return;
@@ -613,10 +636,23 @@ pub const Worker = struct {
             .rejected => |reason| self.logMessage(.warn, "{s}: device_info after resizing was rejected: {s}", .{ device.label, reason }),
             .device => |meta| {
                 if (meta.zones.len != device.zones.len) return;
+                device.max_fps = meta.max_fps;
                 for (device.zones, meta.zones) |*runtime_zone, zone_meta| runtime_zone.adopt(zone_meta);
                 self.logMessage(.info, "{s}.{s}: resized to {d} LEDs", .{ device.label, zone.name, zone.led_count });
+                self.publishCurrentMetadata();
             },
         }
+    }
+
+    /// Sends the supervisor the details of the unchanged device set as the plugin reports them
+    /// now, such as a new LED count.
+    fn publishCurrentMetadata(self: *Worker) void {
+        const current = self.devices orelse return;
+        const fresh = self.fetchDevices() orelse return;
+        defer fresh.release();
+        if (!current.sameTopology(fresh)) return;
+        fresh.serial = current.serial;
+        self.publishMetadata(fresh);
     }
 
     fn markLost(self: *Worker) void {

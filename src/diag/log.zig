@@ -279,6 +279,18 @@ pub const Logger = struct {
         return sdk.text.utf16ToUtf8(buffer, self.path_buffer[0..self.path_len]);
     }
 
+    /// The folder of the open log file, or null while there is none.
+    pub fn directoryPath(self: *Logger, buffer: []u16) ?[]const u16 {
+        win32.AcquireSRWLockExclusive(&self.lock);
+        defer win32.ReleaseSRWLockExclusive(&self.lock);
+        if (self.file == null) return null;
+        const path = self.path_buffer[0..self.path_len];
+        const separator = std.mem.lastIndexOfScalar(u16, path, '\\') orelse return null;
+        if (separator > buffer.len) return null;
+        @memcpy(buffer[0..separator], path[0..separator]);
+        return buffer[0..separator];
+    }
+
     pub fn switchFileName(self: *Logger, file_name: []const u8) OpenError!void {
         var directory: [path_capacity]u16 = undefined;
         win32.AcquireSRWLockExclusive(&self.lock);

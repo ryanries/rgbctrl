@@ -25,6 +25,10 @@ change settles. Only what changed is re-applied: log settings go to the logger, 
 own section changed is reopened, and lighting or `frame_rate` changes only update the affected
 zones.
 
+The settings window, `rgbctrl-gui.exe` (`docs\gui.md`), edits the same files in place and keeps
+their comments. A resident rgbctrl reports what it found, the problems in these files and
+which version of each file it uses in `rgbctrl.inventory.json` next to its log.
+
 ## Top-level keys
 
 | Key | Default | Meaning |

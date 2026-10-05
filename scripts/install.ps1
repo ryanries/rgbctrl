@@ -90,6 +90,7 @@ foreach ($item in $sourceItems) {
 }
 $payload = @(Get-Item -LiteralPath (Join-Path $source "rgbctrl.exe"))
 $payload += @(Get-ChildItem -LiteralPath $source -File -Filter "rgbctrl.example.json" -Force)
+$payload += @(Get-ChildItem -LiteralPath $source -File -Filter "rgbctrl-gui.exe" -Force)
 $sourceFolders = @(Get-Item -LiteralPath $source -Force)
 foreach ($folder in @("plugins", "pawnio")) {
     $path = Join-Path $source $folder
@@ -208,6 +209,9 @@ if (-not (Test-Path -LiteralPath $userFile)) {
 
 $registeredTask = $false
 $createdSource = $false
+$installedGui = Join-Path $installDir "rgbctrl-gui.exe"
+$shortcut = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonPrograms)) "rgbctrl Settings.lnk"
+$createdShortcut = $false
 try {
     $action = New-ScheduledTaskAction -Execute $installedExe -Argument "run --config `"$userFile`""
     $trigger = New-ScheduledTaskTrigger -AtStartup
@@ -219,8 +223,17 @@ try {
         [Diagnostics.EventLog]::CreateEventSource("rgbctrl", "Application")
         $createdSource = $true
     }
+    if (Test-Path -LiteralPath $installedGui) {
+        $link = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut)
+        $link.TargetPath = $installedGui
+        $link.WorkingDirectory = $installDir
+        $link.Description = "Choose the lighting effects, colors and plugins rgbctrl uses"
+        $link.Save()
+        $createdShortcut = $true
+    }
 }
 catch {
+    if ($createdShortcut) { Remove-Item -LiteralPath $shortcut -Force -ErrorAction SilentlyContinue }
     if ($registeredTask) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue }
     if ($createdSource) { [Diagnostics.EventLog]::DeleteEventSource("rgbctrl") }
     Remove-Directory $installDir
@@ -231,6 +244,7 @@ Write-Host "Installed rgbctrl to $installDir"
 Write-Host "Base config: $baseDir\rgbctrl.json (admin-only)"
 Write-Host "User config: $userFile"
 Write-Host "Scheduled task '$taskName' runs rgbctrl as SYSTEM at startup. Log: $installDir\rgbctrl.log"
+if ($createdShortcut) { Write-Host "Settings window: Start menu > rgbctrl Settings ($installedGui)" }
 if ($StartNow) {
     Start-ScheduledTask -TaskName $taskName
     Write-Host "Started the task."

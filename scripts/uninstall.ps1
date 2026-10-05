@@ -9,7 +9,14 @@ $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::Progra
 $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
 $installDir = Join-Path $programFiles "rgbctrl"
 $installedExe = Join-Path $installDir "rgbctrl.exe"
+$installedGui = Join-Path $installDir "rgbctrl-gui.exe"
+$shortcut = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonPrograms)) "rgbctrl Settings.lnk"
 $taskName = "rgbctrl"
+
+if (Test-Path -LiteralPath $shortcut) {
+    Remove-Item -LiteralPath $shortcut -Force
+    Write-Host "Removed the Start menu shortcut 'rgbctrl Settings'."
+}
 
 $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($task) {
@@ -19,6 +26,11 @@ if ($task) {
 
 function Get-InstalledProcesses {
     Get-CimInstance Win32_Process -Filter "Name = 'rgbctrl.exe'" | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -ieq $installedExe) }
+}
+
+foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name = 'rgbctrl-gui.exe'" | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -ieq $installedGui) })) {
+    Write-Host "Closing rgbctrl Settings (process $($process.ProcessId)); unsaved changes in it are lost"
+    Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
 }
 
 $deadline = (Get-Date).AddSeconds(15)

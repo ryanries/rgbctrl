@@ -614,6 +614,71 @@ fn hashInto(state: *u64, maybe_node: ?*const Node) void {
 
 pub const fnv_offset_basis: u64 = 0xcbf29ce484222325;
 
+/// Appends text as a JSON string: quotes, backslashes and control characters escaped, other
+/// UTF-8 unchanged.
+/// Appends text as a JSON string. Bytes that are not valid UTF-8, such as a device name a plugin
+/// took from a Windows code page, become U+FFFD, so the result is always valid JSON.
+pub fn appendString(allocator: std.mem.Allocator, bytes: *std.ArrayList(u8), text: []const u8) error{OutOfMemory}!void {
+    try bytes.append(allocator, '"');
+    var index: usize = 0;
+    while (index < text.len) {
+        const char = text[index];
+        if (char >= 0x80) {
+            const length = std.unicode.utf8ByteSequenceLength(char) catch 0;
+            if (length > 0 and index + length <= text.len and std.unicode.utf8ValidateSlice(text[index .. index + length])) {
+                try bytes.appendSlice(allocator, text[index .. index + length]);
+                index += length;
+            } else {
+                try bytes.appendSlice(allocator, "\u{FFFD}");
+                index += 1;
+            }
+            continue;
+        }
+        switch (char) {
+            '"' => try bytes.appendSlice(allocator, "\\\""),
+            '\\' => try bytes.appendSlice(allocator, "\\\\"),
+            '\n' => try bytes.appendSlice(allocator, "\\n"),
+            '\r' => try bytes.appendSlice(allocator, "\\r"),
+            '\t' => try bytes.appendSlice(allocator, "\\t"),
+            0...8, 11, 12, 14...0x1F => {
+                const digits = "0123456789abcdef";
+                try bytes.appendSlice(allocator, &.{ '\\', 'u', '0', '0', digits[char >> 4], digits[char & 0xF] });
+            },
+            else => try bytes.append(allocator, char),
+        }
+        index += 1;
+    }
+    try bytes.append(allocator, '"');
+}
+
+/// Whether two values are the same JSON: equal scalars, equal items in order, and objects with
+/// the same keys holding equal values in any order.
+pub fn equal(first: *const Node, second: *const Node) bool {
+    if (first.kind() != second.kind()) return false;
+    return switch (first.value) {
+        .null => true,
+        .boolean => |value| value == second.value.boolean,
+        .number => |value| value == second.value.number,
+        .string => |text| std.mem.eql(u8, text, second.value.string),
+        .array => |items| blk: {
+            const others = second.value.array;
+            if (items.len != others.len) break :blk false;
+            for (items, others) |item, other| {
+                if (!equal(item, other)) break :blk false;
+            }
+            break :blk true;
+        },
+        .object => |members| blk: {
+            if (members.len != second.value.object.len) break :blk false;
+            for (members) |member| {
+                const other = second.get(member.key) orelse break :blk false;
+                if (!equal(member.value, other)) break :blk false;
+            }
+            break :blk true;
+        },
+    };
+}
+
 const testing = std.testing;
 
 fn parseForTest(arena: std.mem.Allocator, source: []const u8, warnings: *std.ArrayList(Issue)) !*const Node {
@@ -817,4 +882,48 @@ test "the key hash seed is chosen once per process and is never zero" {
     try testing.expect(first != 0);
     try testing.expectEqual(first, keySeed());
     try testing.expectEqual(hashKey("frame_rate"), hashKey("frame_rate"));
+}
+
+test "appendString escapes what JSON requires and parses back to the same text" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const original = "C:\\Users\\\"Ünï\"\n\ttab\x01";
+    var bytes: std.ArrayList(u8) = .empty;
+    try bytes.appendSlice(arena, "{\"k\": ");
+    try appendString(arena, &bytes, original);
+    try bytes.append(arena, '}');
+    try testing.expect(std.mem.indexOf(u8, bytes.items, "\\u0001") != null);
+    var warnings: std.ArrayList(Issue) = .empty;
+    const root = try parseForTest(arena, bytes.items, &warnings);
+    try testing.expectEqualStrings(original, root.get("k").?.string().?);
+}
+
+test "appendString turns bytes that are not UTF-8 into U+FFFD and keeps valid characters" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var bytes: std.ArrayList(u8) = .empty;
+    try bytes.appendSlice(arena, "{\"k\": ");
+    // A Windows-1252 trademark sign, a sequence cut short, an overlong encoding of '/', then valid
+    // two- and four-byte characters.
+    try appendString(arena, &bytes, "G915\x99 \xE2\x84 \xC0\xAF \u{E9}\u{1F600}");
+    try bytes.append(arena, '}');
+    var warnings: std.ArrayList(Issue) = .empty;
+    const root = try parseForTest(arena, bytes.items, &warnings);
+    try testing.expectEqualStrings("G915\u{FFFD} \u{FFFD}\u{FFFD} \u{FFFD}\u{FFFD} \u{E9}\u{1F600}", root.get("k").?.string().?);
+}
+
+test "equal compares values deeply and ignores the order of object keys" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var warnings: std.ArrayList(Issue) = .empty;
+    const first = try parseForTest(arena, "{ \"a\": [1, \"x\", true, null], \"b\": { \"c\": 2 } }", &warnings);
+    const reordered = try parseForTest(arena, "{ \"b\": { \"c\": 2.0 }, \"a\": [1, \"x\", true, null] }", &warnings);
+    const different = try parseForTest(arena, "{ \"a\": [1, \"x\", false, null], \"b\": { \"c\": 2 } }", &warnings);
+    const extra = try parseForTest(arena, "{ \"a\": [1, \"x\", true, null], \"b\": { \"c\": 2, \"d\": 3 } }", &warnings);
+    try testing.expect(equal(first, reordered));
+    try testing.expect(!equal(first, different));
+    try testing.expect(!equal(first, extra));
 }

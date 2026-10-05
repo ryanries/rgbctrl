@@ -194,6 +194,16 @@ pub fn checkInstall(arena: std.mem.Allocator, install_directory: []const u16, fi
     var buffer: [path_capacity]u16 = undefined;
     const exe = join(&buffer, install_directory, win32.L("rgbctrl.exe")) orelse return false;
     if (!try checkAndRecord(arena, findings, exe, .file, false)) ok = false;
+    // The settings window is optional, but it asks for administrator approval, so a copy that
+    // others could replace must not stay unnoticed.
+    var gui_buffer: [path_capacity]u16 = undefined;
+    const gui = join(&gui_buffer, install_directory, win32.L("rgbctrl-gui.exe")) orelse return false;
+    switch (presenceWithoutFollowing(gui)) {
+        .absent => {},
+        .present, .failed => if (!try checkAndRecord(arena, findings, gui, .file, false)) {
+            ok = false;
+        },
+    }
     var plugins_buffer: [path_capacity]u16 = undefined;
     const plugins = join(&plugins_buffer, install_directory, win32.L("plugins")) orelse return false;
     if (!try checkDirectoryWithFiles(arena, findings, plugins, ".dll")) ok = false;
@@ -208,6 +218,20 @@ pub const BaseVerdict = union(enum) {
     trusted,
     untrusted: []const u8,
 };
+
+/// True when only administrators can change the file, its folder and every folder above, as for
+/// the files of an installed rgbctrl.
+pub fn adminOnlyFile(arena: std.mem.Allocator, file: []const u16) error{OutOfMemory}!bool {
+    const directory = parentDirectory(file) orelse return false;
+    var findings: std.ArrayList(Finding) = .empty;
+    if (!try checkAncestors(arena, &findings, directory)) return false;
+    var directory_buffer: [path_capacity]u16 = undefined;
+    const terminated_directory = join(&directory_buffer, directory, &.{}) orelse return false;
+    if (checkObject(terminated_directory, .directory, false) != null) return false;
+    var file_buffer: [path_capacity]u16 = undefined;
+    const terminated_file = join(&file_buffer, file, &.{}) orelse return false;
+    return checkObject(terminated_file, .file, true) == null and finalPathProblem(terminated_file) == null;
+}
 
 pub fn checkBase(arena: std.mem.Allocator, base_directory: []const u16, findings: *std.ArrayList(Finding)) error{OutOfMemory}!BaseVerdict {
     var directory_buffer: [path_capacity]u16 = undefined;

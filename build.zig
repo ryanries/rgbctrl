@@ -49,6 +49,17 @@ pub fn build(b: *std.Build) void {
     const host_step = b.step("host", "Build rgbctrl.exe only");
     host_step.dependOn(&install_exe.step);
 
+    // The optional settings window. It shares the host's config code but never loads plugins.
+    const gui = b.createModule(.{ .root_source_file = b.path("src/gui_main.zig"), .target = target, .optimize = optimize, .strip = strip });
+    gui.addImport("sdk", sdk_host);
+    gui.addImport("rt", rt);
+    const gui_exe = b.addExecutable(.{ .name = "rgbctrl-gui", .root_module = gui, .win32_manifest = b.path("src/gui/rgbctrl-gui.manifest") });
+    gui_exe.subsystem = .windows;
+    gui_exe.bundle_compiler_rt = bundle_compiler_rt;
+    const install_gui = b.addInstallArtifact(gui_exe, .{ .implib_dir = .disabled });
+    b.getInstallStep().dependOn(&install_gui.step);
+    b.step("gui", "Build rgbctrl-gui.exe only").dependOn(&install_gui.step);
+
     const test_step = b.step("test", "Run all unit tests");
 
     const host_tests_module = b.createModule(.{ .root_source_file = b.path("src/host_tests.zig"), .target = target, .optimize = .debug });

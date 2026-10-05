@@ -64,8 +64,23 @@ pub fn utf16ToUtf8(buffer: []u8, text: []const u16) []const u8 {
     return buffer[0..length];
 }
 
+/// Returns the longest start of text that is at most max_bytes long and does not end partway
+/// through a character.
+pub fn utf8Prefix(text: []const u8, max_bytes: usize) []const u8 {
+    if (text.len <= max_bytes) return text;
+    var length = max_bytes;
+    while (length > 0 and text[length] & 0xC0 == 0x80) length -= 1;
+    return text[0..length];
+}
+
+/// Converts text to a NUL-terminated UTF-16 string in buffer; null when text is not valid UTF-8
+/// or does not fit.
 pub fn utf8ToUtf16(buffer: []u16, text: []const u8) ?[:0]const u16 {
-    if (buffer.len == 0) return null;
+    // std.unicode.utf8ToUtf16Le assumes that the output fits, so the length is checked first.
+    // calcUtf16LeLen reads past the end of a character cut short, so the text is validated before.
+    if (!std.unicode.utf8ValidateSlice(text)) return null;
+    const needed = std.unicode.calcUtf16LeLen(text) catch return null;
+    if (needed >= buffer.len) return null;
     const length = std.unicode.utf8ToUtf16Le(buffer[0 .. buffer.len - 1], text) catch return null;
     buffer[length] = 0;
     return buffer[0..length :0];
@@ -118,6 +133,35 @@ test "utf16ToUtf8 converts surrogate pairs and replaces lone surrogates" {
     var buffer: [32]u8 = undefined;
     const text = [_]u16{ 'C', ':', 0xD83D, 0xDE00, 0xD800 };
     try std.testing.expectEqualStrings("C:\u{1F600}\u{FFFD}", utf16ToUtf8(&buffer, &text));
+}
+
+test "utf8ToUtf16 refuses text that does not fit or is not UTF-8 instead of overrunning" {
+    var buffer: [4]u16 = undefined;
+    const fits = utf8ToUtf16(&buffer, "a\u{1F600}").?;
+    try std.testing.expectEqualSlices(u16, &.{ 'a', 0xD83D, 0xDE00 }, fits);
+    try std.testing.expectEqual(@as(u16, 0), fits.ptr[fits.len]);
+    try std.testing.expect(utf8ToUtf16(&buffer, "abcd") == null);
+    try std.testing.expect(utf8ToUtf16(&buffer, "\u{1F600}\u{1F600}") == null);
+    try std.testing.expect(utf8ToUtf16(&buffer, "a\x99") == null);
+    try std.testing.expect(utf8ToUtf16(buffer[0..0], "") == null);
+}
+
+test "utf8ToUtf16 refuses a character cut short at the end of the text" {
+    var buffer: [8]u16 = undefined;
+    try std.testing.expect(utf8ToUtf16(&buffer, "a\xC3") == null);
+    try std.testing.expect(utf8ToUtf16(&buffer, ("a\u{20AC}")[0..2]) == null);
+    try std.testing.expect(utf8ToUtf16(&buffer, ("a\u{20AC}")[0..3]) == null);
+    try std.testing.expect(utf8ToUtf16(&buffer, ("\u{1F600}")[0..3]) == null);
+}
+
+test "utf8Prefix never ends partway through a character" {
+    try std.testing.expectEqualStrings("abc", utf8Prefix("abc", 5));
+    try std.testing.expectEqualStrings("ab", utf8Prefix("abc", 2));
+    try std.testing.expectEqualStrings("a", utf8Prefix("a\u{20AC}b", 2));
+    try std.testing.expectEqualStrings("a", utf8Prefix("a\u{20AC}b", 3));
+    try std.testing.expectEqualStrings("a\u{20AC}", utf8Prefix("a\u{20AC}b", 4));
+    try std.testing.expectEqualStrings("", utf8Prefix("\u{1F600}", 3));
+    try std.testing.expectEqualStrings("", utf8Prefix("abc", 0));
 }
 
 test "hexBytes separates bytes with spaces and stops at the buffer end" {

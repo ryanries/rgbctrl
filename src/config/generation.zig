@@ -24,6 +24,16 @@ const LayerStatus = union(enum) {
 const LayerReport = struct {
     path: []const u8,
     status: LayerStatus = .absent,
+    /// The file's stamp, taken just before it was read: a change after that moment differs from
+    /// it, so polling the stamp never misses a change to the configuration that was loaded.
+    stamp: Stamp = .{},
+
+    pub fn failed(self: *const LayerReport) bool {
+        return switch (self.status) {
+            .parse_error, .unreadable => true,
+            else => false,
+        };
+    }
 };
 
 pub const Sources = struct {
@@ -135,6 +145,7 @@ pub fn load(serial: u64, sources: *const Sources) error{OutOfMemory}!*ConfigGene
     } else {
         base.trusted = true;
     }
+    generation.base.stamp = stampFor(sources.base_file, sources.elevated);
     if (base_readable) {
         if (try readLayer(generation, &generation.base, sources.base_file, sources.elevated and !base.trusted)) |content| {
             base.root = try parseLayer(generation, &generation.base, content);
@@ -143,6 +154,7 @@ pub fn load(serial: u64, sources: *const Sources) error{OutOfMemory}!*ConfigGene
     }
 
     var user = LoadedLayer{ .trusted = !sources.elevated };
+    generation.user.stamp = stampFor(sources.user_file, sources.elevated);
     if (try readLayer(generation, &generation.user, sources.user_file, sources.elevated)) |content| {
         user.root = try parseLayer(generation, &generation.user, content);
         if (user.root != null) generation.user.status = if (sources.elevated) .{ .used_untrusted = "untrusted while elevated; privileged keys can only be tightened" } else .used;

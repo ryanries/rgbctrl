@@ -100,6 +100,26 @@ function Fixture([string]$Name) {
     return Join-Path $fixtures $Name
 }
 
+$inventoryPath = "$work\bin\rgbctrl.inventory.json"
+
+function Get-Stamp([string]$Path) {
+    $item = Get-Item -LiteralPath $Path
+    return "$($item.LastWriteTimeUtc.ToFileTimeUtc()):$($item.Length)"
+}
+
+function Wait-Inventory([scriptblock]$Accept, [int]$Seconds) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path $inventoryPath) {
+            $data = $null
+            try { $data = Get-Content $inventoryPath -Raw | ConvertFrom-Json } catch { $data = $null }
+            if ($data -and (& $Accept $data)) { return $data }
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    return $null
+}
+
 try {
     $version = Invoke-Rgbctrl @("version")
     Test-Condition "version prints the version and exits 0" (($version.Code -eq 0) -and ($version.Output -match "rgbctrl \d+\.\d+\.\d+"))
@@ -156,6 +176,7 @@ try {
 
     $checkInstall = Invoke-Rgbctrl @("check-install", "--dir", "$work\bin")
     Test-Condition "check-install fails (exit 4) for a user-writable folder" (($checkInstall.Code -eq 4) -and ($checkInstall.Output -match "FAIL"))
+    Test-Condition "list and apply write no inventory" (-not (Test-Path $inventoryPath))
 
     Clear-Log
     $userConfig = "$work\user.json"
@@ -163,11 +184,26 @@ try {
     $resident = Start-Resident $userConfig
     Test-Condition "run starts and animates" (Wait-LogPattern "virtual.strip: rainbow via host frames" 10)
     Test-Condition "run keeps sending frames" (Wait-LogPattern "(?s)frame with first LED red.*frame with first LED red.*frame with first LED red" 5)
+    $inventory = Wait-Inventory { param($data) $data.devices | Where-Object { $_.key -eq "virtual" } } 10
+    Test-Condition "run publishes the inventory next to its log" ($null -ne $inventory)
+    if ($inventory) {
+        $virtual = $inventory.devices | Where-Object { $_.key -eq "virtual" }
+        $plugin = $inventory.plugins | Where-Object { $_.name -eq "virtual_led" }
+        $user = $inventory.config.user
+        Test-Condition "the inventory lists the virtual zone, the active plugin and the user config" (($inventory.format -eq 1) -and ($virtual.zones[0].name -eq "strip") -and ($virtual.zones[0].max_leds -eq 64) -and ($virtual.zones[0].resizable -eq $true) -and ($plugin.state -eq "active") -and ($user.path -eq $userConfig) -and ($user.applied_stamp -eq (Get-Stamp $userConfig)) -and ($user.attempted_stamp -eq $user.applied_stamp) -and ($user.failed -eq $false))
+    }
+    Test-Condition "the inventory reports the LED count after a resize" ($null -ne (Wait-Inventory { param($data) ($data.devices | Where-Object { $_.key -eq "virtual" }).zones[0].leds -eq 24 } 10))
     $second = Invoke-Rgbctrl @("list", "--config", $userConfig)
     Test-Condition "a second instance exits 2 and names the stop commands" (($second.Code -eq 2) -and ($second.Output -match "Stop-ScheduledTask"))
     Start-Sleep -Milliseconds 1200
     Copy-Item -Force (Fixture "virtual_static.json") $userConfig
     Test-Condition "run reloads a changed config" (Wait-LogPattern "virtual.strip: static via hardware" 10)
+    $expectedStamp = Get-Stamp $userConfig
+    Test-Condition "the inventory reports the stamp of the reloaded config" ($null -ne (Wait-Inventory { param($data) $data.config.user.applied_stamp -eq $expectedStamp } 10))
+    Start-Sleep -Milliseconds 1200
+    Copy-Item -Force (Fixture "broken.json") $userConfig
+    $brokenStamp = Get-Stamp $userConfig
+    Test-Condition "a refused reload keeps the applied stamp and reports the file it could not use" ($null -ne (Wait-Inventory { param($data) $data.config.kept_previous -and $data.config.user.failed -and ($data.config.user.attempted_stamp -eq $brokenStamp) -and ($data.config.user.applied_stamp -eq $expectedStamp) } 10))
     Test-Condition "stop ends the resident instance" (Stop-Resident $resident 8000)
     Test-Condition "run exits with code 0 and closes with EXIT" (($resident.ExitCode -eq 0) -and ((Get-LogText) -match "closed \(exit\)"))
 

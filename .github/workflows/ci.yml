@@ -41,3 +41,5 @@ jobs:
           if ($oversized) { $oversized | ForEach-Object { Write-Error "$($_.Name) is $($_.Length) bytes, above the 128 KiB plugin limit" }; exit 1 }
           $exe = Get-Item zig-out/bin/rgbctrl.exe
           if ($exe.Length -gt 524288) { Write-Error "rgbctrl.exe is $($exe.Length) bytes, above the 512 KiB limit"; exit 1 }
+          $gui = Get-Item zig-out/bin/rgbctrl-gui.exe
+          if ($gui.Length -gt 524288) { Write-Error "rgbctrl-gui.exe is $($gui.Length) bytes, above the 512 KiB limit"; exit 1 }
