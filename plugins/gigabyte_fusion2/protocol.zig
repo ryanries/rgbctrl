@@ -22,6 +22,10 @@ pub const command_lamp_array: u8 = 0x48;
 pub const command_save: u8 = 0x5E;
 
 pub const all_zones_mask: u32 = 0x07FF;
+/// Bits of the feature flags in the 0x60 reply (OpenRGB's support_cmd_flag): the firmware has
+/// the persist flag command 0x47, and the LampArray command 0x48.
+pub const feature_persist_flag: u8 = 0x01;
+pub const feature_lamp_array: u8 = 0x02;
 /// Every effect slot of the IT5711, including 0x20..0x23 and 0x90, which no zone of this board uses.
 pub const effect_slots = [_]u8{ 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x90, 0x91, 0x92 };
 
@@ -370,6 +374,9 @@ test "LED count classes preserve untouched nibbles from the shadow" {
 
 test "simple command packet builders produce exact feature reports" {
     var packet: [report_length]u8 = undefined;
+    buildSimpleValue(&packet, command_persist_flag, 0);
+    try std.testing.expectEqualSlices(u8, &.{ 0xCC, 0x47, 0x00 }, packet[0..3]);
+    try expectZeroTail(packet, 3);
     buildSimpleValue(&packet, command_lamp_array, 0);
     try std.testing.expectEqualSlices(u8, &.{ report_id, command_lamp_array, 0 }, packet[0..3]);
     try expectZeroTail(packet, 3);

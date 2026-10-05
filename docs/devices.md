@@ -25,12 +25,19 @@ PC, and the log at `debug` level records every probe and response.
   version, LED count classes, color order calibration and feature flags). A header whose
   calibration is all zero gets no capabilities and a warning. The firmware string, version and
   feature flags are logged at `debug`, and every feature report at `trace`.
+- Before the first lighting write after start, resume or reconnect, and before the first one
+  after a save: the persist flag off (`CC 47 00`) when the firmware has it (feature flag 0x01).
+  Gigabyte Control Center turns it off whenever it takes control of the board (at start, after
+  a resume and after a Gen2 scan). While rgbctrl's saves left it on, the fan on ARGB_V2_1 of
+  the X870E AORUS PRO ICE kept the color last saved through every hardware effect written to it,
+  across a power cycle, while host frames still showed.
 - First lighting write after start, resume, reconnect or resizing: LampArray off when the
   firmware has it, beat mode off (`CC 31 00`), the LED count classes of the resized headers,
   and the mask of host-streamed headers. After start, resume or reconnect (not after resizing),
   every effect slot is also cleared between LampArray and beat mode (`CC 20`..`CC 27` and
   `CC 90`..`CC 92`, each an empty effect with no zones) and all zones are applied
-  (`CC 28 FF 07`), as OpenRGB does when it opens the board. Without it the X870E AORUS PRO ICE
+  (`CC 28 FF 07`), as OpenRGB does when it opens the board; rgbctrl then waits 100 ms, as
+  Gigabyte Control Center does after the same clear. Without the clear the X870E AORUS PRO ICE
   (firmware 1.0.19.5) kept its factory rainbow on every zone although every write succeeded.
   Zones left untouched (`none`, the default) are cleared as well instead of keeping the effect
   stored on the board, so give every zone you want lit an effect.
@@ -44,7 +51,9 @@ PC, and the log at `debug` level records every probe and response.
   motherboard alone, with warnings in the log. After a cold boot of the X870E AORUS PRO ICE,
   rgbctrl's writes in the first seconds after Windows started left the I/O cover dark until
   the next restart, while every other zone took them; the same writes minutes later lit it.
-- `persist`: `CC 47 01`, `CC 5E 00`.
+- `persist`: `CC 47 01` when the firmware has it, then `CC 5E 00`. The flag stays on until the
+  next lighting write turns it off; with it on after the last save, the board showed the saved
+  colors after a power cycle until rgbctrl wrote again.
 - Conflicts: Gigabyte Control Center / RGB Fusion, OpenRGB, SignalRGB.
 
 ## gigabyte_gpu: graphics card lighting

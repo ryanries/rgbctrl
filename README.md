@@ -358,9 +358,14 @@ installed copy. `check-install` also checks `rgbctrl-gui.exe` when it is install
   plugins run; per-LED colors, engines, `persist` and the plugins' own settings, such as the GPU
   LCD readout, still need a text editor. It has no live preview.
 - On the X870E AORUS PRO ICE the I/O cover once stopped following color changes and stayed on
-  the first new color, while `persist` was saving to flash within 30 ms of each change; a
-  reboot cleared it. rgbctrl now saves only after a device's effects have been unchanged for
-  60 s. If a zone still stops responding, reboot the PC.
+  the first new color while `persist` was saving to flash within 30 ms of each change, and later
+  the fan on ARGB_V2_1 kept the color last saved through every hardware effect, across a power
+  cycle, while host frames still showed. Both happened while rgbctrl's saves left the
+  controller's persist flag on (`CC 47 01`), which Gigabyte Control Center turns off whenever it
+  takes control of the board. rgbctrl now turns it off before it writes after a start, a resume
+  or a save, and saves only after a device's effects have been unchanged for 60 s. If an ARGB
+  header still stops responding, give it `"engine": "host"`, which streams its colors directly;
+  otherwise reboot the PC.
 - After a cold boot, the same board left its I/O cover dark until the next restart when rgbctrl
   wrote to it in the first seconds after Windows started (every other zone took the writes),
   and lit it when the same writes came minutes later. So in `run` the motherboard's lighting

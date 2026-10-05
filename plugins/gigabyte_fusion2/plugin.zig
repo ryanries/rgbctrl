@@ -18,6 +18,8 @@ const default_boot_delay_seconds: u32 = 300;
 const max_boot_delay_seconds: u32 = 900;
 // A save waits this long after held writes went out, as the host waits after any change.
 const save_settle_ms: u64 = 60_000;
+// Gigabyte Control Center waits this long after clearing every effect slot.
+const slot_clear_settle_ms: u32 = 100;
 
 const OpenResult = error{ NotFound, Busy, Access, DeviceLost };
 
@@ -96,6 +98,9 @@ const Instance = struct {
     pending_direct_mask: bool = false,
     first_write_init_pending: bool = true,
     slot_reset_pending: bool = true,
+    // The controller's persist flag (CC 47) may be on: it cannot be read, and every save of
+    // rgbctrl turns it on. See ensureReadyForLighting.
+    persist_flag_may_be_on: bool = true,
     // See WriteGate; while it holds, effects and frames are kept and sent by tick.
     gate: WriteGate = .{ .delay_ms = 0 },
     held_any: bool = false,
@@ -297,6 +302,7 @@ const Instance = struct {
         self.applyCapabilities();
         self.first_write_init_pending = true;
         self.slot_reset_pending = true;
+        self.persist_flag_may_be_on = true;
         // The slot reset of the next first write clears every zone on the board, so frames the
         // host sends again unchanged must go out again.
         @memset(&self.argb_sent_valid, false);
@@ -324,8 +330,25 @@ const Instance = struct {
 
     fn ensureReadyForLighting(self: *Instance) i32 {
         if (!self.present or self.device == null) return abi.status_device_lost;
+        if (self.persist_flag_may_be_on) {
+            // With the flag on, the ARGB_V2_1 header of the X870E AORUS PRO ICE kept the color
+            // last saved through every effect written to it (host frames still showed). Gigabyte
+            // Control Center turns the flag off whenever it takes control of the board: at start,
+            // after a resume and after a Gen2 scan.
+            if ((self.feature_flags & protocol.feature_persist_flag) != 0) {
+                var flag_packet: [protocol.report_length]u8 = undefined;
+                protocol.buildSimpleValue(&flag_packet, protocol.command_persist_flag, 0);
+                self.setFeature(&flag_packet) catch {
+                    self.closeHandle();
+                    self.present = false;
+                    return abi.status_device_lost;
+                };
+                self.host.debug("turned the controller's persist flag off before writing", .{});
+            }
+            self.persist_flag_may_be_on = false;
+        }
         if (self.first_write_init_pending) {
-            if ((self.feature_flags & 0x02) != 0) {
+            if ((self.feature_flags & protocol.feature_lamp_array) != 0) {
                 var lamp_packet: [protocol.report_length]u8 = undefined;
                 protocol.buildSimpleValue(&lamp_packet, protocol.command_lamp_array, 0);
                 self.setFeature(&lamp_packet) catch {
@@ -352,6 +375,7 @@ const Instance = struct {
                     self.present = false;
                     return abi.status_device_lost;
                 };
+                sdk.win32.Sleep(slot_clear_settle_ms);
                 self.slot_reset_pending = false;
                 self.host.debug("cleared every effect slot before the first lighting write", .{});
             }
@@ -674,19 +698,25 @@ fn persist(pointer: ?*anyopaque, device_index: u32) callconv(.c) i32 {
     if (!self.present or self.device == null) return abi.status_device_lost;
     if (!self.gate.saveAllowed(self.host.nowMs(), self.held_any)) return abi.status_busy;
     var packet: [protocol.report_length]u8 = undefined;
-    protocol.buildSimpleValue(&packet, protocol.command_persist_flag, 1);
-    self.setFeature(&packet) catch {
-        self.closeHandle();
-        self.present = false;
-        return abi.status_device_lost;
-    };
-    sdk.win32.Sleep(20);
+    // Gigabyte Control Center sends 0x47 only to firmware that reports it.
+    if ((self.feature_flags & protocol.feature_persist_flag) != 0) {
+        protocol.buildSimpleValue(&packet, protocol.command_persist_flag, 1);
+        self.setFeature(&packet) catch {
+            self.closeHandle();
+            self.present = false;
+            return abi.status_device_lost;
+        };
+        sdk.win32.Sleep(20);
+    }
     protocol.buildSimpleValue(&packet, protocol.command_save, 0);
     self.setFeature(&packet) catch {
         self.closeHandle();
         self.present = false;
         return abi.status_device_lost;
     };
+    sdk.win32.Sleep(20);
+    // The flag stays on with the saved settings until the next lighting write turns it off.
+    self.persist_flag_may_be_on = true;
     return abi.status_ok;
 }
 
