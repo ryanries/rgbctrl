@@ -20,7 +20,13 @@ const clock_module = @import("runtime/clock.zig");
 
 const win32 = sdk.win32;
 
+pub const std_options: std.Options = .{
+    .enable_segfault_handler = false,
+};
+
 comptime {
+    if (!@hasDecl(@import("root"), "std_options")) @compileError("rgbctrl must explicitly define std_options");
+    if (std.options.enable_segfault_handler) @compileError("rgbctrl requires Zig's segfault handler to be disabled for NVML SEH containment");
     if (!builtin.is_test) _ = @import("rt");
 }
 

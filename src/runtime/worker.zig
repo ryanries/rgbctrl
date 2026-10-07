@@ -353,7 +353,7 @@ pub const Worker = struct {
         const status = table.open.?(&self.context.host, @ptrCast(plugin_config), &instance);
         self.endCall();
         if (status != abi.status_ok) {
-            self.logMessage(.err, "open failed ({s}); the plugin stays inactive until its configuration changes", .{statusName(status)});
+            self.logMessage(.err, "open failed ({s}); the plugin remains inactive", .{statusName(status)});
             self.publishDevices(null, .failed);
             return;
         }

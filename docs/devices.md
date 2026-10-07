@@ -273,6 +273,10 @@ PC, and the log at `debug` level records every probe and response.
 - Publishes `gpu.temp` (C), `gpu.load` (%), `gpu.power` (W), `gpu.fan` (RPM of the fastest
   fan), `gpu.freq` (graphics clock, MHz), `gpu.mem.freq` (memory clock, MHz) and `gpu.mem.load`
   (VRAM in use, %). A reading the GPU does not support is logged once and left out.
+- If an NVML call raises an access violation, rgbctrl logs the faulting operation and disables
+  NVIDIA GPU sensors until rgbctrl restarts. During a resident `rgbctrl run`, values already
+  published remain in the in-process sensor table and become stale after 5 s. A Gigabyte GPU LCD
+  keeps each last good value for up to 10 s, then displays 0 until rgbctrl restarts.
 
 ## Sensors
 

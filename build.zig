@@ -61,6 +61,26 @@ pub fn build(b: *std.Build) void {
     b.step("gui", "Build rgbctrl-gui.exe only").dependOn(&install_gui.step);
 
     const test_step = b.step("test", "Run all unit tests");
+    const nvml_guard_source = b.path("plugins/nvidia_gpu/nvml_guard.c");
+    const nvml_guard_flags = [_][]const u8{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-fms-extensions" };
+    const nvml_guard_production_flags = [_][]const u8{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-command-line-argument", "-fms-extensions", "-fno-sanitize=undefined" };
+    const nvml_guard_test_flags = [_][]const u8{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-fms-extensions", "-DRGBCTRL_NVML_GUARD_TEST=1" };
+    const debug_rt = b.createModule(.{
+        .root_source_file = b.path("sdk/rt.zig"),
+        .target = target,
+        .optimize = .debug,
+        .no_builtin = true,
+    });
+    const debug_host_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = .debug,
+    });
+    debug_host_module.addImport("sdk", sdk_test);
+    debug_host_module.addImport("rt", debug_rt);
+    const debug_host_check = b.addExecutable(.{ .name = "rgbctrl-debug-host-check", .root_module = debug_host_module });
+    debug_host_check.bundle_compiler_rt = true;
+    test_step.dependOn(&debug_host_check.step);
 
     const host_tests_module = b.createModule(.{ .root_source_file = b.path("src/host_tests.zig"), .target = target, .optimize = .debug });
     host_tests_module.addImport("sdk", sdk_test);
@@ -74,8 +94,6 @@ pub fn build(b: *std.Build) void {
     const run_sdk_tests = b.addRunArtifact(sdk_tests);
     test_step.dependOn(&run_sdk_tests.step);
 
-    // The C header, translated so the test can compare it with the Zig ABI mirror. Its only
-    // includes, <stddef.h> and <stdint.h>, come with Zig's C headers, so no libc is linked.
     const plugin_header = b.addTranslateC(.{
         .root_source_file = b.path("include/rgbctrl_plugin.h"),
         .target = target,
@@ -94,6 +112,10 @@ pub fn build(b: *std.Build) void {
         const module = b.createModule(.{ .root_source_file = source, .target = target, .optimize = optimize, .strip = strip, .single_threaded = true });
         module.addImport("sdk", sdk_plugin);
         module.addImport("rt", rt);
+        if (std.mem.eql(u8, name, "nvidia_gpu")) {
+            module.addCSourceFile(.{ .file = nvml_guard_source, .flags = &nvml_guard_production_flags });
+            module.linkSystemLibrary("kernel32", .{});
+        }
         const library = b.addLibrary(.{ .linkage = .dynamic, .name = name, .root_module = module });
         library.bundle_compiler_rt = bundle_compiler_rt;
         const install = b.addInstallArtifact(library, .{
@@ -106,11 +128,51 @@ pub fn build(b: *std.Build) void {
 
         const test_module = b.createModule(.{ .root_source_file = source, .target = target, .optimize = .debug });
         test_module.addImport("sdk", sdk_test);
+        if (std.mem.eql(u8, name, "nvidia_gpu")) {
+            test_module.addCSourceFile(.{ .file = nvml_guard_source, .flags = &nvml_guard_flags });
+            test_module.linkSystemLibrary("kernel32", .{});
+        }
         const tests = b.addTest(.{ .name = b.fmt("{s}-tests", .{name}), .root_module = test_module });
         const run_tests = b.addRunArtifact(tests);
         test_step.dependOn(&run_tests.step);
         b.step(b.fmt("test-{s}", .{name}), b.fmt("Run the {s} plugin unit tests", .{name})).dependOn(&run_tests.step);
     }
+
+    const nvidia_guard_test_module = b.createModule(.{
+        .root_source_file = b.path("plugins/nvidia_gpu/guard_tests.zig"),
+        .target = target,
+        .optimize = .small,
+        .single_threaded = true,
+    });
+    const nvidia_guard_sdk = b.createModule(.{
+        .root_source_file = b.path("sdk/sdk.zig"),
+        .target = target,
+        .optimize = .small,
+        .single_threaded = true,
+    });
+    const nvidia_guard_rt = b.createModule(.{
+        .root_source_file = b.path("sdk/rt.zig"),
+        .target = target,
+        .optimize = .small,
+        .no_builtin = true,
+    });
+    const nvidia_guard_plugin_module = b.createModule(.{
+        .root_source_file = b.path("plugins/nvidia_gpu/plugin.zig"),
+        .target = target,
+        .optimize = .small,
+        .single_threaded = true,
+    });
+    nvidia_guard_plugin_module.addImport("sdk", nvidia_guard_sdk);
+    nvidia_guard_plugin_module.addImport("rt", nvidia_guard_rt);
+    nvidia_guard_test_module.addImport("nvidia_plugin", nvidia_guard_plugin_module);
+    nvidia_guard_test_module.addCSourceFile(.{ .file = nvml_guard_source, .flags = &nvml_guard_test_flags });
+    nvidia_guard_test_module.linkSystemLibrary("kernel32", .{});
+    const nvidia_guard_tests = b.addTest(.{ .name = "nvidia-guard-tests", .root_module = nvidia_guard_test_module });
+    const run_nvidia_guard_tests = b.addRunArtifact(nvidia_guard_tests);
+    test_step.dependOn(&run_nvidia_guard_tests.step);
+    const nvidia_guard_step = b.step("test-nvidia-guard", "Run the NVIDIA NVML exception guard tests");
+    nvidia_guard_step.dependOn(&run_nvidia_guard_tests.step);
+    nvidia_guard_step.dependOn(&debug_host_check.step);
 
     const examples_step = b.step("examples", "Build the C example plugin and its test variants");
     for (c_plugin_variants) |variant| {
